@@ -146,6 +146,24 @@ def test_extract_bitfields_handles_single_field_register():
     assert fields[0].bit_range == (31, 0)
 
 
+def test_extract_bitfields_strips_width_suffix_from_field_name():
+    # ST often spells multi-bit field names with their width: "DIVM3[5:0]".
+    # The bit position lives in "Bits 25:20" already, so the suffix is
+    # redundant; strip it from the canonical name.
+    body = (
+        "Bits 25:20 DIVM3[5:0]: Prescaler for PLL3\n"
+        "Set and reset by software to configure the prescaler.\n"
+        "Bits 17:12 DIVM2[5:0]: Prescaler for PLL2\n"
+        "Same as DIVM3.\n"
+    )
+    fields = extract_bitfields(body)
+    by_name = {f.name: f for f in fields}
+    assert "DIVM3" in by_name
+    assert "DIVM2" in by_name
+    assert by_name["DIVM3"].bit_range == (25, 20)
+    assert by_name["DIVM3"].description.startswith("Prescaler for PLL3")
+
+
 def test_extract_bitfields_tolerates_leading_indentation():
     # PyMuPDF's get_text(sort=True) preserves visual reading order but
     # also indents lines. The regex must not require Bits to be at column 0.

@@ -75,7 +75,11 @@ BITS_LINE_RE = re.compile(
 )
 
 NAME_COLON_RE = re.compile(
-    r"^(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?P<desc>.*)$"
+    # Allow an optional [N:M] or [N] width suffix on the field name, as
+    # ST commonly uses for multi-bit fields ("DIVM3[5:0]: Prescaler...").
+    # The suffix is dropped from the captured name so find_register('DIVM3')
+    # works without forcing callers to know the exact width form.
+    r"^(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:\[\d+(?::\d+)?\])?\s*:\s*(?P<desc>.*)$"
 )
 
 

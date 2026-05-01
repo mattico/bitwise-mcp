@@ -171,30 +171,45 @@ class SemanticChunker:
 
         for section in sections:
             current_hierarchy = ancestors + [section.title]
+            prefix = self._build_context_prefix(doc_title, current_hierarchy)
+
+            # Try the ST register parser first, working on the section's
+            # content concatenated with any "Table N. ..." subsection
+            # content. ST RMs nest a "Table N. NAME address offset and
+            # reset value" entry under most register sections; the page-
+            # range slicing in pdf_parser puts almost all the bitfield
+            # prose under that subsection's content, leaving the parent
+            # nearly empty. Concatenating recovers the prose so registers
+            # like RCC_AHB4ENR get a real bitfield_definition chunk
+            # instead of being lost as a generic text chunk.
+            merged_content = self._merge_table_subsection_content(section)
+            if merged_content.strip():
+                merged = Section(
+                    title=section.title,
+                    level=section.level,
+                    start_page=section.start_page,
+                    end_page=section.end_page,
+                    content=merged_content,
+                    subsections=[],
+                )
+                st_chunk = self._try_st_register_chunk(
+                    doc_id, merged, ancestors, prefix
+                )
+                if st_chunk is not None:
+                    chunks.append(st_chunk)
+                    continue
 
             if section.subsections:
-                # Non-leaf: recurse into subsections only — skip own content
-                # to avoid duplicating text already covered by children
+                # Non-leaf, non-register: recurse into subsections only --
+                # skip own content to avoid duplicating text already covered
+                # by children.
                 sub_chunks = self._chunk_sections(
                     doc_id, section.subsections, doc_title, current_hierarchy
                 )
                 chunks.extend(sub_chunks)
             else:
-                # Leaf section: chunk its content
-                prefix = self._build_context_prefix(doc_title, current_hierarchy)
                 content = section.content.strip()
                 if not content:
-                    continue
-
-                # ST-style: a leaf titled "... register (NAME)" with "Bits N:M ..."
-                # paragraphs is a register description. Parse it into a single
-                # register_definition chunk so find_register and semantic search
-                # both get rich structured data.
-                st_chunk = self._try_st_register_chunk(
-                    doc_id, section, ancestors, prefix
-                )
-                if st_chunk is not None:
-                    chunks.append(st_chunk)
                     continue
 
                 if len(prefix) + len(content) <= self.target_size:
@@ -235,6 +250,24 @@ class SemanticChunker:
     def _clean_section_label(cls, title: str) -> str:
         """Strip leading section numbers (e.g. '4.9 FLASH registers' -> 'FLASH registers')."""
         return cls._SECTION_NUMBER_RE.sub("", title).strip()
+
+    @staticmethod
+    def _merge_table_subsection_content(section: Section) -> str:
+        """Return ``section.content`` plus any "Table N." subsection content.
+
+        ST RM TOC layout puts each register's bitfield prose under a
+        "Table N. NAME address offset and reset value" sub-entry, leaving
+        the parent register section's content slice nearly empty. The
+        register parser needs the prose, so we concatenate.
+
+        Other (non-table) subsections are left alone -- merging genuine
+        peripheral chapters would create huge chunks and double-count text.
+        """
+        parts = [section.content or ""]
+        for sub in section.subsections:
+            if sub.title.lstrip().startswith("Table "):
+                parts.append(sub.content or "")
+        return "\n".join(p for p in parts if p)
 
     def _try_st_register_chunk(
         self,
