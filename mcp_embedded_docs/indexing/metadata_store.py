@@ -241,16 +241,31 @@ class MetadataStore:
         """
         cursor = self.conn.cursor()
 
+        # Prefer chunks with richer detail: a register section's
+        # bitfield_definition chunk has the full prose + bitfields, while a
+        # summary table contributes only a (name, offset) stub. Order by
+        # chunk_type so the rich one wins when both exist.
+        type_order = (
+            "CASE c.chunk_type "
+            "WHEN 'bitfield_definition' THEN 0 "
+            "WHEN 'register_map' THEN 1 "
+            "ELSE 2 END"
+        )
+
         if peripheral:
-            cursor.execute("""
-                SELECT chunk_id FROM registers
-                WHERE name = ? AND peripheral = ?
+            cursor.execute(f"""
+                SELECT r.chunk_id FROM registers r
+                JOIN chunks c ON c.id = r.chunk_id
+                WHERE r.name = ? AND r.peripheral = ?
+                ORDER BY {type_order}
                 LIMIT 1
             """, (name, peripheral))
         else:
-            cursor.execute("""
-                SELECT chunk_id FROM registers
-                WHERE name = ?
+            cursor.execute(f"""
+                SELECT r.chunk_id FROM registers r
+                JOIN chunks c ON c.id = r.chunk_id
+                WHERE r.name = ?
+                ORDER BY {type_order}
                 LIMIT 1
             """, (name,))
 

@@ -4,8 +4,6 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 import re
 
-import pdfplumber
-
 from .table_detector import TableRegion, TableType
 
 
@@ -49,38 +47,28 @@ class TableExtractor:
         """Initialize extractor with PDF path."""
         self.pdf_path = pdf_path
 
-    def extract_register_table(self, table_region: TableRegion, context: str = "") -> Optional[RegisterTable]:
-        """Extract structured data from a table region.
+    def extract_register_table(
+        self,
+        table_region: TableRegion,
+        table_data: List[List[str]],
+        context: str = "",
+    ) -> Optional[RegisterTable]:
+        """Parse pre-extracted cell data into a RegisterTable.
 
-        Args:
-            table_region: Detected table region
-            context: Context text around the table
-
-        Returns:
-            Structured register table or None if extraction fails
+        ``table_data`` is the rows-and-cells output produced by the
+        detector when it ran ``pdfplumber.Page.extract_tables()``.
+        Reusing that data here avoids re-opening the PDF per table -
+        on a 3000+ page reference manual the saving is huge.
         """
-        with pdfplumber.open(self.pdf_path) as pdf:
-            page = pdf.pages[table_region.page_num]
+        if not table_data or len(table_data) < 2:
+            return None
 
-            # Extract all tables and get the specific one we want
-            tables = page.extract_tables()
-
-            if not tables or table_region.table_index >= len(tables):
-                return None
-
-            # Get the specific table by index
-            table_data = tables[table_region.table_index]
-
-            if not table_data or len(table_data) < 2:  # Need header + at least one row
-                return None
-
-            # Parse based on table type
-            if table_region.table_type == TableType.REGISTER_MAP:
-                return self._parse_register_map(table_data, context)
-            elif table_region.table_type == TableType.BITFIELD_DEFINITION:
-                return self._parse_bitfield_table(table_data, context)
-            elif table_region.table_type == TableType.MEMORY_MAP:
-                return self._parse_memory_map(table_data, context)
+        if table_region.table_type == TableType.REGISTER_MAP:
+            return self._parse_register_map(table_data, context)
+        elif table_region.table_type == TableType.BITFIELD_DEFINITION:
+            return self._parse_bitfield_table(table_data, context)
+        elif table_region.table_type == TableType.MEMORY_MAP:
+            return self._parse_memory_map(table_data, context)
 
         return None
 

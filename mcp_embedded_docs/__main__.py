@@ -45,7 +45,17 @@ def _cli_group():
     @click.argument('pdf_path', type=click.Path(exists=True))
     @click.option('--title', help='Document title')
     @click.option('--version', help='Document version')
-    def ingest(pdf_path: str, title: str = None, version: str = None):
+    @click.option(
+        '--no-tables',
+        is_flag=True,
+        help=(
+            "Skip pdfplumber-based register-table detection. ST reference "
+            "manuals get richer per-register data from the section-text "
+            "parser; the table pass mostly duplicates that and is the "
+            "slowest, most memory-hungry phase of ingestion."
+        ),
+    )
+    def ingest(pdf_path: str, title: str = None, version: str = None, no_tables: bool = False):
         """Index a PDF document."""
         pdf_path = Path(pdf_path)
         config = Config.load()
@@ -62,22 +72,27 @@ def _cli_group():
 
         click.echo(f"  Extracted {len(pages)} pages, {len(sections)} sections", err=True)
 
-        click.echo("Detecting register tables...", err=True)
-        extractor = TableExtractor(str(pdf_path))
-
         all_tables = []
         table_pages = {}
-        with TableDetector(str(pdf_path)) as detector:
-            for page in pages:
-                table_regions = detector.detect_register_tables(page)
-                for region in table_regions:
-                    context = detector.detect_table_context(page, region)
-                    table = extractor.extract_register_table(region, context)
-                    if table:
-                        table_pages[len(all_tables)] = region.page_num
-                        all_tables.append(table)
+        if no_tables:
+            click.echo("Skipping register-table detection (--no-tables).", err=True)
+        else:
+            click.echo(f"Detecting register tables across {len(pages)} pages...", err=True)
+            extractor = TableExtractor(str(pdf_path))
 
-        click.echo(f"  Found {len(all_tables)} register tables", err=True)
+            with TableDetector(str(pdf_path)) as detector:
+                for i, page in enumerate(pages):
+                    if i % 200 == 0:
+                        click.echo(f"  page {i}/{len(pages)} (tables found: {len(all_tables)})", err=True)
+                    detected = detector.detect_register_tables(page)
+                    for region, table_data in detected:
+                        context = detector.detect_table_context(page, region)
+                        table = extractor.extract_register_table(region, table_data, context)
+                        if table:
+                            table_pages[len(all_tables)] = region.page_num
+                            all_tables.append(table)
+
+            click.echo(f"  Found {len(all_tables)} register tables", err=True)
 
         click.echo("Creating semantic chunks...", err=True)
         chunker = SemanticChunker(

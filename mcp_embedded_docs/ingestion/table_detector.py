@@ -71,16 +71,17 @@ class TableDetector:
         if self._pdf:
             self._pdf.close()
 
-    def detect_register_tables(self, page: Page) -> List[TableRegion]:
+    def detect_register_tables(
+        self, page: Page
+    ) -> List[Tuple[TableRegion, List[List[str]]]]:
         """Detect register tables on a page using pdfplumber.
 
-        Args:
-            page: Page to analyze
-
-        Returns:
-            List of detected table regions
+        Returns each detected table together with its already-extracted
+        cell data so callers don't have to re-open the PDF and re-run
+        ``extract_tables()``. On large reference manuals that double-pass
+        is the dominant memory + time cost.
         """
-        tables = []
+        out: List[Tuple[TableRegion, List[List[str]]]] = []
 
         # Use cached PDF if available, otherwise open temporarily
         if self._pdf:
@@ -93,7 +94,6 @@ class TableDetector:
         try:
             pdf_page = pdf.pages[page.page_num]
 
-            # Extract all tables from the page
             extracted_tables = pdf_page.extract_tables()
 
             for table_idx, table_data in enumerate(extracted_tables):
@@ -106,26 +106,24 @@ class TableDetector:
                     str(cell) for row in header_rows for cell in row if cell
                 ).lower()
 
-                # Extract keywords from header
                 header_keywords = self._extract_keywords_from_text(header_text)
 
-                # Check if this is a register-related table
                 if self._is_likely_table_header(header_keywords):
                     table_type = self._classify_table_type(header_keywords)
 
-                    # Create a table region with the table index
-                    tables.append(TableRegion(
+                    region = TableRegion(
                         page_num=page.page_num,
                         bbox=(0, 0, pdf_page.width, pdf_page.height),
                         table_type=table_type,
                         header_keywords=header_keywords,
-                        table_index=table_idx
-                    ))
+                        table_index=table_idx,
+                    )
+                    out.append((region, table_data))
         finally:
             if should_close:
                 pdf.close()
 
-        return tables
+        return out
 
     def _group_blocks_into_rows(self, blocks: List[TextBlock], tolerance: float = 5.0) -> List[List[TextBlock]]:
         """Group text blocks into rows based on y-coordinate."""

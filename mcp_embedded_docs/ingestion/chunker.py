@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 
 from .pdf_parser import Section
+from .st_extractor import parse_register_section
 from .table_extractor import RegisterTable
 
 # Sentence boundary pattern: period/question/exclamation followed by space or newline,
@@ -185,6 +186,17 @@ class SemanticChunker:
                 if not content:
                     continue
 
+                # ST-style: a leaf titled "... register (NAME)" with "Bits N:M ..."
+                # paragraphs is a register description. Parse it into a single
+                # register_definition chunk so find_register and semantic search
+                # both get rich structured data.
+                st_chunk = self._try_st_register_chunk(
+                    doc_id, section, ancestors, prefix
+                )
+                if st_chunk is not None:
+                    chunks.append(st_chunk)
+                    continue
+
                 if len(prefix) + len(content) <= self.target_size:
                     # Fits in a single chunk
                     chunk_text = prefix + content
@@ -212,6 +224,55 @@ class SemanticChunker:
                     chunks.extend(split_chunks)
 
         return chunks
+
+    # ------------------------------------------------------------------
+    # ST-style register section
+    # ------------------------------------------------------------------
+
+    _SECTION_NUMBER_RE = re.compile(r"^\s*\d+(?:\.\d+)*\.?\s+")
+
+    @classmethod
+    def _clean_section_label(cls, title: str) -> str:
+        """Strip leading section numbers (e.g. '4.9 FLASH registers' -> 'FLASH registers')."""
+        return cls._SECTION_NUMBER_RE.sub("", title).strip()
+
+    def _try_st_register_chunk(
+        self,
+        doc_id: str,
+        section: Section,
+        ancestors: List[str],
+        prefix: str,
+    ) -> Optional[Chunk]:
+        """Emit a register_definition chunk for an ST-style register section.
+
+        Returns None if the section doesn't look like an ST register
+        description (no parenthesized abbrev in the title, or no
+        "Bits N:M ..." prose).
+        """
+        peripheral = self._clean_section_label(ancestors[-1]) if ancestors else ""
+        table = parse_register_section(section.title, section.content, peripheral)
+        if table is None:
+            return None
+
+        text = prefix + self._format_table_as_text(table)
+        structured = self._format_table_as_json(table)
+
+        chunk_hash = hashlib.md5(text.encode()).hexdigest()[:12]
+        return Chunk(
+            id=f"{doc_id}_{chunk_hash}",
+            doc_id=doc_id,
+            chunk_type=table.table_type.value,
+            text=text,
+            structured_data=structured,
+            metadata={
+                "section_title": section.title,
+                "section_level": section.level,
+                "peripheral": table.peripheral,
+                "register_names": [r.name for r in table.registers],
+            },
+            page_start=section.start_page,
+            page_end=section.end_page,
+        )
 
     # ------------------------------------------------------------------
     # Sentence-aware splitting
