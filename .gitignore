@@ -50,3 +50,6 @@ htmlcov/
 
 # macOS
 .DS_Store
+
+# Claude
+.claude/*.local.*
