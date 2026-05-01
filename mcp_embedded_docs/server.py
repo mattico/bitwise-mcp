@@ -1,16 +1,23 @@
 """MCP server for embedded documentation using FastMCP."""
 
 import logging
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from mcp.server.fastmcp import FastMCP
 
 from .config import Config
 
+if TYPE_CHECKING:
+    from .retrieval.hybrid_search import HybridSearch
+
 logger = logging.getLogger(__name__)
 
-# Global config
+# Globals cached for the life of the server process. Spinning up a new
+# HybridSearch per tool call reloads the sentence-transformer model from
+# disk every time (~5-30s of latency depending on OS cache state) -- that's
+# what makes search_docs hang for minutes when called rapidly.
 _config: Optional[Config] = None
+_search: Optional["HybridSearch"] = None
 
 
 def get_config() -> Config:
@@ -19,6 +26,15 @@ def get_config() -> Config:
     if _config is None:
         _config = Config.load()
     return _config
+
+
+def get_search() -> "HybridSearch":
+    """Get or create the shared HybridSearch instance."""
+    global _search
+    if _search is None:
+        from .retrieval.hybrid_search import HybridSearch
+        _search = HybridSearch(get_config())
+    return _search
 
 
 # Create FastMCP server
@@ -43,8 +59,7 @@ async def search_docs(
     """
     from .tools.search_docs import search_docs as _search
 
-    config = get_config()
-    return await _search(query, top_k, doc_filter, config)
+    return await _search(get_search(), query, top_k, doc_filter)
 
 
 @mcp.tool()
@@ -63,8 +78,7 @@ async def find_register(
     """
     from .tools.find_register import find_register as _find
 
-    config = get_config()
-    return await _find(name, peripheral, config)
+    return await _find(get_search(), name, peripheral)
 
 
 @mcp.tool()
