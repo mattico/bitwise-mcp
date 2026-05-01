@@ -36,8 +36,11 @@ class TableDetector:
         "address", "offset", "register", "name", "width", "reset", "access", "description"
     }
 
+    # ARM Cortex-M reference manuals use "Bits | Name | Description" or
+    # "Bits | Name | Function" headers, so include 'name' and 'function'.
     BITFIELD_HEADERS = {
-        "field", "bit", "bits", "range", "type", "access", "reset", "description"
+        "field", "bit", "bits", "range", "type", "access", "reset",
+        "description", "name", "function",
     }
 
     MEMORY_MAP_HEADERS = {
@@ -94,13 +97,16 @@ class TableDetector:
         try:
             pdf_page = pdf.pages[page.page_num]
 
-            extracted_tables = pdf_page.extract_tables()
+            # find_tables() exposes per-table bboxes that extract_tables()
+            # alone does not. The bboxes are needed so detect_table_context()
+            # can pull the right caption text for each table.
+            found = pdf_page.find_tables()
 
-            for table_idx, table_data in enumerate(extracted_tables):
+            for table_idx, table in enumerate(found):
+                table_data = table.extract()
                 if not table_data or len(table_data) < 2:
                     continue
 
-                # Get first 2 rows to analyze headers
                 header_rows = table_data[:2]
                 header_text = ' '.join(
                     str(cell) for row in header_rows for cell in row if cell
@@ -113,7 +119,7 @@ class TableDetector:
 
                     region = TableRegion(
                         page_num=page.page_num,
-                        bbox=(0, 0, pdf_page.width, pdf_page.height),
+                        bbox=tuple(table.bbox),
                         table_type=table_type,
                         header_keywords=header_keywords,
                         table_index=table_idx,

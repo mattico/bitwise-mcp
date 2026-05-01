@@ -269,10 +269,27 @@ class TableExtractor:
 
         return "Unknown"
 
+    # ARM Cortex-M bitfield-table captions follow the pattern
+    # "Table N. NAME[ register] bit assignments". The NAME may be all-caps
+    # (APSR, IPSR, BASEPRI) or a capitalized word (Control, Cache). The
+    # required " bit assignments" suffix avoids matching summary tables
+    # like "Table 22. Fault status and fault address registers".
+    _ARM_CAPTION_RE = re.compile(
+        r"Table\s+\d+\s*\.\s+(?P<name>[A-Za-z][A-Za-z0-9_]+)"
+        r"[^\n]*?\bbit\s+assignments\b",
+        re.IGNORECASE,
+    )
+
     def _extract_register_name(self, context: str) -> str:
         """Extract register name from context."""
         if not context:
             return "Unknown"
+
+        m = self._ARM_CAPTION_RE.search(context)
+        if m:
+            # ARM symbol convention is all-uppercase even when the caption
+            # uses prose ("Control register" -> "CONTROL").
+            return m.group("name").upper()
 
         # Look for register names (usually uppercase abbreviations)
         words = context.split()
