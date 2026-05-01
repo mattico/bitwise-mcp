@@ -1,5 +1,7 @@
 """Hybrid search combining keyword and semantic search."""
 
+import logging
+import time
 from typing import List, Optional, Dict, Tuple
 from pathlib import Path
 
@@ -8,6 +10,9 @@ from ..indexing.vector_store import VectorStore
 from ..indexing.metadata_store import MetadataStore
 from ..config import Config
 from . import SearchResult
+
+
+logger = logging.getLogger(__name__)
 
 
 class HybridSearch:
@@ -21,21 +26,26 @@ class HybridSearch:
         """
         self.config = config
 
-        # Initialize components
+        t0 = time.perf_counter()
         self.embedder = LocalEmbedder(
             model_name=config.embeddings.model,
             device=config.embeddings.device
         )
+        logger.info("embedder loaded in %.2fs (model=%s)", time.perf_counter() - t0, config.embeddings.model)
 
-        # Initialize stores (will be loaded if they exist)
         index_dir = config.index.directory
         self.vector_store = VectorStore(dimension=self.embedder.dimension)
+        t0 = time.perf_counter()
         self.metadata_store = MetadataStore(index_dir / config.index.metadata_db)
+        logger.info("metadata store opened in %.2fs (path=%s)", time.perf_counter() - t0, index_dir / config.index.metadata_db)
 
-        # Try to load existing index
         vector_path = index_dir / config.index.vector_file
         if vector_path.exists():
+            t0 = time.perf_counter()
             self.vector_store.load(vector_path)
+            logger.info("vector store loaded in %.2fs (path=%s)", time.perf_counter() - t0, vector_path)
+        else:
+            logger.warning("vector store not found at %s; semantic search disabled", vector_path)
 
     def search(
         self,
@@ -53,16 +63,20 @@ class HybridSearch:
         Returns:
             List of search results sorted by relevance
         """
-        # Get keyword search results
+        t_start = time.perf_counter()
+        logger.info("search start query=%r top_k=%d doc_filter=%s", query, top_k, doc_filter)
+
+        t0 = time.perf_counter()
         keyword_results = self._keyword_search(query, top_k * 2, doc_filter)
+        t_kw = time.perf_counter() - t0
 
-        # Get semantic search results
+        t0 = time.perf_counter()
         semantic_results = self._semantic_search(query, top_k * 2, doc_filter)
+        t_sem = time.perf_counter() - t0
 
-        # Combine and rank results
+        t0 = time.perf_counter()
         combined = self._combine_results(keyword_results, semantic_results)
 
-        # Get full chunk data for top results
         results = []
         for chunk_id, score in combined[:top_k]:
             chunk_data = self.metadata_store.get_chunk(chunk_id)
@@ -77,7 +91,12 @@ class HybridSearch:
                     page_start=chunk_data["page_start"],
                     page_end=chunk_data["page_end"]
                 ))
+        t_fetch = time.perf_counter() - t0
 
+        logger.info(
+            "search done in %.3fs (keyword=%.3fs semantic=%.3fs fetch=%.3fs, %d results)",
+            time.perf_counter() - t_start, t_kw, t_sem, t_fetch, len(results),
+        )
         return results
 
     def _keyword_search(

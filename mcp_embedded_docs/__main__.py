@@ -1,10 +1,22 @@
 """CLI entry point for MCP Embedded Docs."""
 
+import logging
+import os
 import sys
 
 
 def _run_server():
     """Run MCP server directly, bypassing Click to avoid stdin/stdout interference."""
+    # Route logs to stderr so the MCP host (Claude Code, VSCode) can surface
+    # them. stdout is reserved for the JSON-RPC protocol -- logging there
+    # would corrupt the stream. BITWISE_MCP_DEBUG=1 raises the level to DEBUG
+    # for deeper investigation.
+    level = logging.DEBUG if os.getenv("BITWISE_MCP_DEBUG") else logging.INFO
+    logging.basicConfig(
+        level=level,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     from .server import mcp
     mcp.run(transport="stdio")
 
@@ -116,6 +128,11 @@ def _cli_group():
         )
 
         vector_store = VectorStore(dimension=embedder.dimension)
+        # Load any existing FAISS index before adding new vectors so we
+        # accumulate across ingests instead of overwriting every time.
+        vector_path = config.index.directory / config.index.vector_file
+        if vector_path.exists():
+            vector_store.load(vector_path)
         metadata_store = MetadataStore(config.index.directory / config.index.metadata_db)
 
         metadata_store.add_document(
@@ -159,6 +176,48 @@ def _cli_group():
     def serve():
         """Start MCP server on stdio."""
         _run_server()
+
+    @_cli.command(name="rebuild-vectors")
+    def rebuild_vectors():
+        """Rebuild the FAISS index from chunks already in the metadata DB.
+
+        Useful when the vector file is missing, corrupted, or was clobbered
+        by a prior bug (the older ingest path overwrote the index per
+        document instead of accumulating). Doesn't re-parse PDFs.
+        """
+        import sqlite3
+        config = Config.load()
+
+        embedder = LocalEmbedder(
+            model_name=config.embeddings.model,
+            device=config.embeddings.device
+        )
+
+        db_path = config.index.directory / config.index.metadata_db
+        if not db_path.exists():
+            click.echo(f"No metadata DB at {db_path}", err=True)
+            return
+
+        con = sqlite3.connect(db_path)
+        con.row_factory = sqlite3.Row
+        rows = list(con.execute("SELECT id, text FROM chunks ORDER BY rowid"))
+        con.close()
+
+        if not rows:
+            click.echo("No chunks in metadata DB to embed.", err=True)
+            return
+
+        click.echo(f"Re-embedding {len(rows)} chunks...", err=True)
+        chunk_ids = [r["id"] for r in rows]
+        chunk_texts = [r["text"] for r in rows]
+        embeddings = embedder.embed_batch(chunk_texts, show_progress=True)
+
+        vector_store = VectorStore(dimension=embedder.dimension)
+        vector_store.add_vectors(embeddings, chunk_ids)
+
+        config.index.directory.mkdir(parents=True, exist_ok=True)
+        vector_store.save(config.index.directory / config.index.vector_file)
+        click.echo(f"Wrote {len(chunk_ids)} vectors to {config.index.directory / config.index.vector_file}", err=True)
 
     @_cli.command(name="list")
     def list_cmd():

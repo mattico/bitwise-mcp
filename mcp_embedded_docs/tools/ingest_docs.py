@@ -103,6 +103,11 @@ async def ingest_docs(doc_path: str, title: Optional[str] = None, version: Optio
         )
 
         vector_store = VectorStore(dimension=embedder.dimension)
+        # Load any existing FAISS index before adding new vectors so we
+        # accumulate across ingests instead of overwriting every time.
+        vector_path = config.index.directory / config.index.vector_file
+        if vector_path.exists():
+            vector_store.load(vector_path)
         metadata_store = MetadataStore(config.index.directory / config.index.metadata_db)
 
         # Add document metadata

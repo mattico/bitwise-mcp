@@ -32,8 +32,12 @@ def get_search() -> "HybridSearch":
     """Get or create the shared HybridSearch instance."""
     global _search
     if _search is None:
+        import time
         from .retrieval.hybrid_search import HybridSearch
+        t0 = time.perf_counter()
+        logger.info("Initializing HybridSearch (loading embedder + index)...")
         _search = HybridSearch(get_config())
+        logger.info("HybridSearch ready in %.2fs", time.perf_counter() - t0)
     return _search
 
 
