@@ -37,13 +37,13 @@ claude mcp add --scope project embedded-docs python -m mcp_embedded_docs
 
 Each project maintains its own isolated documentation index. When you run the server in a project, it only indexes and searches PDFs in that project's `docs/` directory.
 
-### Option 3: Poetry Install (Development)
+### Option 3: uv Install (Development)
 
 ```bash
-poetry install
+uv sync
 
 # Add to Claude Code
-claude mcp add embedded-docs --command poetry --args "run" "mcp-embedded-docs" "serve" --cwd "<path-to-this-repo>"
+claude mcp add embedded-docs --command uv --args "run" "mcp-embedded-docs" "serve" --cwd "<path-to-this-repo>"
 ```
 
 Restart Claude Code after adding the server.
@@ -71,8 +71,8 @@ The MCP server automatically queries the indexed documentation when you ask ques
 ### CLI Usage
 
 ```bash
-poetry run mcp-embedded-docs ingest docs/manual.pdf --title "MCU Manual"
-poetry run mcp-embedded-docs list  # View indexed documents
+uv run mcp-embedded-docs ingest docs/manual.pdf --title "MCU Manual"
+uv run mcp-embedded-docs list  # View indexed documents
 ```
 
 ## MCP Tools

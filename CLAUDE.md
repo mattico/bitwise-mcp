@@ -5,14 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-poetry install                                    # Install dependencies
-poetry run mcp-embedded-docs serve                # Start MCP server (stdio)
-poetry run mcp-embedded-docs ingest PATH --title "Title"  # Ingest a PDF
-poetry run mcp-embedded-docs list                 # List indexed documents
-poetry run pytest                                 # Run tests
-poetry run pytest tests/test_chunker.py -k "test_name"  # Single test
-poetry run black mcp_embedded_docs/               # Format
-poetry run mypy mcp_embedded_docs/                # Type check
+uv sync                                           # Install dependencies
+uv run mcp-embedded-docs serve                    # Start MCP server (stdio)
+uv run mcp-embedded-docs ingest PATH --title "Title"  # Ingest a PDF
+uv run mcp-embedded-docs list                     # List indexed documents
+uv run pytest                                     # Run tests
+uv run pytest tests/test_chunker.py -k "test_name"  # Single test
+uv run black mcp_embedded_docs/                   # Format
+uv run mypy mcp_embedded_docs/                    # Type check
 ```
 
 ## Architecture
