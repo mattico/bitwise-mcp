@@ -51,3 +51,33 @@ def test_extract_register_name_falls_back_to_first_uppercase_word():
 def test_extract_register_name_returns_unknown_for_empty_context():
     ex = TableExtractor("dummy.pdf")
     assert ex._extract_register_name("") == "Unknown"
+
+
+def test_extract_register_name_from_usb334x_numbered_heading():
+    # USB334x: "7.1.1.5  Function Control  Address = 04-06h (read), ..."
+    ex = TableExtractor("dummy.pdf")
+    ctx = "USB334x 7.1.1.5 Function Control Address = 04-06h (read), 04h (write)"
+    assert ex._extract_register_name(ctx) == "Function Control"
+
+
+def test_extract_register_name_from_ulpi_numbered_heading():
+    # ULPI v1.1: "4.2.2 Function Control Address: 04h-06h (Read), ..."
+    ex = TableExtractor("dummy.pdf")
+    ctx = "4.2.2 Function Control Address: 04h-06h (Read), 04h (Write)"
+    assert ex._extract_register_name(ctx) == "Function Control"
+
+
+def test_extract_register_name_numbered_heading_handles_multi_word_names():
+    ex = TableExtractor("dummy.pdf")
+    ctx = "7.1.3.4 Vendor Rid Conversion Address = 36-38h (read)"
+    assert ex._extract_register_name(ctx) == "Vendor Rid Conversion"
+
+
+def test_extract_register_name_numbered_heading_doesnt_match_without_address():
+    # Without an "Address" anchor we shouldn't pick up arbitrary numbered
+    # headings (e.g. a table of contents fragment in the context).
+    ex = TableExtractor("dummy.pdf")
+    ctx = "1.2 List of abbreviations for registers SomethingElse"
+    # Falls through to the generic uppercase-word fallback - returns
+    # "SomethingElse" if it qualifies; here neither word does, so Unknown.
+    assert ex._extract_register_name(ctx) == "Unknown"

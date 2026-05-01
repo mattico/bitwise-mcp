@@ -280,6 +280,17 @@ class TableExtractor:
         re.IGNORECASE,
     )
 
+    # Microchip USB334x and ULPI spec write each register as a numbered
+    # subsection followed immediately by an "Address" line and the bitfield
+    # table:
+    #   "7.1.1.5     Function Control"
+    #   "Address = 04-06h (read), 04h (write), ..."
+    # The "Address" anchor avoids matching unrelated numbered headings.
+    _NUMBERED_HEADING_RE = re.compile(
+        r"\b\d+(?:\.\d+)+\s+(?P<name>[A-Z][\w\-]*(?:\s+[A-Z][\w\-]*)*)"
+        r"\s+[Aa]ddress\b"
+    )
+
     def _extract_register_name(self, context: str) -> str:
         """Extract register name from context."""
         if not context:
@@ -290,6 +301,10 @@ class TableExtractor:
             # ARM symbol convention is all-uppercase even when the caption
             # uses prose ("Control register" -> "CONTROL").
             return m.group("name").upper()
+
+        m = self._NUMBERED_HEADING_RE.search(context)
+        if m:
+            return m.group("name").strip()
 
         # Look for register names (usually uppercase abbreviations)
         words = context.split()
