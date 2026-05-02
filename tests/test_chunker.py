@@ -10,7 +10,7 @@ exists in the source PDF.
 
 from __future__ import annotations
 
-from mcp_embedded_docs.ingestion.chunker import SemanticChunker
+from mcp_embedded_docs.ingestion.chunker import SemanticChunker, _is_toc_chunk
 from mcp_embedded_docs.ingestion.pdf_parser import Section
 
 
@@ -116,6 +116,74 @@ def test_chunker_merges_table_subsection_prose_when_parent_is_register():
     field_names = [f["name"] for f in register_chunks[0].structured_data["registers"][0]["fields"]]
     assert "ADC3EN" in field_names
     assert "GPIOHEN" in field_names
+
+
+def test_is_toc_chunk_detects_dot_leader_pattern():
+    # PyMuPDF preserves TOC dot leaders as ". . . . ." with intervening
+    # spaces. A chunk with several such lines should be flagged.
+    toc_text = (
+        "[STM32 Bootloader (AN2606) > Table 1. Applicable products]\n"
+        "33     STM32F401xx devices  . . . . . . . . . . . . . . . . . . . 158\n"
+        "33.1   Bootloader configuration   . . . . . . . . . . . . . . . . 158\n"
+        "33.2   Bootloader selection . . . . . . . . . . . . . . . . . . . 159\n"
+        "33.3   Bootloader version  . . . . . . . . . . . . . . . . . . . . 160\n"
+    )
+    assert _is_toc_chunk(toc_text)
+
+
+def test_is_toc_chunk_leaves_real_prose_alone():
+    prose = (
+        "[Doc > Section]\n"
+        "The FLASH access control register controls the number of wait\n"
+        "states used during read operations. The application software has\n"
+        "to program LATENCY according to the embedded flash memory clock\n"
+        "frequency and voltage conditions. Default is seven wait states.\n"
+    )
+    assert not _is_toc_chunk(prose)
+
+
+def test_is_toc_chunk_ignores_short_chunks():
+    # Don't false-positive on a 2-3 line chunk that incidentally has dots.
+    short = "[Doc > Sec]\nFigure 12. . . layout"
+    assert not _is_toc_chunk(short)
+
+
+def test_chunker_drops_toc_chunks_when_section_content_is_mixed():
+    """Mirrors AN2606's "Table 1. Applicable products" section: the
+    page-range slicing pulls in 25 pages of TOC plus the actual product
+    list. We want the product list to survive but the TOC dot-leader
+    chunks to be dropped."""
+    real_table = "STM32C0 series:  STM32C011xx, STM32C031xx, STM32C051xx, STM32C071xx\n" * 8
+    toc = (
+        "33     STM32F401xx devices  . . . . . . . . . . . . . . . . . . . 158\n"
+        "33.1   Bootloader configuration   . . . . . . . . . . . . . . . . 158\n"
+        "33.2   Bootloader selection . . . . . . . . . . . . . . . . . . . 159\n"
+        "33.3   Bootloader version  . . . . . . . . . . . . . . . . . . . . 160\n"
+    ) * 30  # plenty of TOC to push us past the chunk size
+    chunker = SemanticChunker(target_size=400)
+    section = Section(
+        title="Table 1. Applicable products",
+        level=1,
+        start_page=1,
+        end_page=25,
+        content=real_table + "\n" + toc,
+        subsections=[],
+    )
+    chunks = chunker.chunk_document(
+        doc_id="d",
+        sections=[section],
+        tables=[],
+        doc_title="STM32 Bootloader",
+    )
+    # Real product chunk(s) survive
+    assert any("STM32C011xx" in c.text for c in chunks)
+    # TOC-dominated chunks are dropped: the filter's own test is that
+    # _is_toc_chunk returns False for every emitted chunk.
+    assert all(not _is_toc_chunk(c.text) for c in chunks)
+    # And the volume of TOC text in the index is much smaller than what
+    # was in the section (most of that content was TOC).
+    total_toc_lines = sum(c.text.count(". . . . ") for c in chunks)
+    assert total_toc_lines < 30, f"too much TOC dot-leader content survived: {total_toc_lines} lines"
 
 
 def test_chunker_does_not_also_emit_text_chunk_for_register_subsection():

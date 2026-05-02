@@ -83,7 +83,8 @@ async def ingest_docs(doc_path: str, title: Optional[str] = None, version: Optio
         chunker = SemanticChunker(
             target_size=config.chunking.target_size,
             overlap=config.chunking.overlap,
-            preserve_tables=config.chunking.preserve_tables
+            preserve_tables=config.chunking.preserve_tables,
+            pdf_path=doc_path_obj,
         )
 
         doc_title = title or doc_path_obj.stem

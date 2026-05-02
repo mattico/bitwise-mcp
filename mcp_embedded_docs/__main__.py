@@ -110,7 +110,8 @@ def _cli_group():
         chunker = SemanticChunker(
             target_size=config.chunking.target_size,
             overlap=config.chunking.overlap,
-            preserve_tables=config.chunking.preserve_tables
+            preserve_tables=config.chunking.preserve_tables,
+            pdf_path=pdf_path,
         )
 
         doc_title = title or pdf_path.stem

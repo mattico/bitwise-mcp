@@ -3,6 +3,7 @@
 import hashlib
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from .pdf_parser import Section
@@ -12,6 +13,35 @@ from .table_extractor import RegisterTable
 # Sentence boundary pattern: period/question/exclamation followed by space or newline,
 # or a double newline (paragraph break)
 _SENTENCE_BOUNDARY_RE = re.compile(r'(?<=[.!?])\s+|\n\n+')
+
+# Lines from a table-of-contents page have a leader of dots/spaces between
+# the title and the page number. PyMuPDF preserves these as ". . . . ."
+# (with intervening spaces) or as long runs of consecutive dots.
+_TOC_LEADER_RE = re.compile(r'\.\s\.\s\.|\.{4,}')
+
+# Section title for a free-standing data table (e.g. "Table 226. Bootloader
+# device-dependent parameters"). Used to opt into a special chunking path
+# that prepends column-header context so chunks split off the middle of a
+# many-page table aren't a stream of headerless rows.
+_TABLE_SECTION_TITLE_RE = re.compile(r'^\s*Table\s+\d+\.', re.IGNORECASE)
+
+
+def _is_toc_chunk(text: str, threshold: float = 0.4) -> bool:
+    """True when most non-blank lines in ``text`` look like TOC entries.
+
+    A TOC line in PyMuPDF output is something like
+    ``33.1   Bootloader configuration  . . . . . . . . .  158``: it ends
+    with a leader of ". . ." or many consecutive dots. When that pattern
+    dominates a chunk it's just TOC pollution -- e.g. AN2606's first TOC
+    entry is "Table 1. Applicable products" at page 2 with the next entry
+    at page 27, so the chunker sees 25 pages of TOC under that title.
+    """
+    body = text.split("]\n", 1)[-1]  # strip the [Doc > ...] hierarchy line
+    lines = [line for line in body.splitlines() if line.strip()]
+    if len(lines) < 4:
+        return False
+    toc_lines = sum(1 for line in lines if _TOC_LEADER_RE.search(line))
+    return toc_lines / len(lines) >= threshold
 
 
 @dataclass
@@ -30,17 +60,29 @@ class Chunk:
 class SemanticChunker:
     """Create semantic chunks from parsed documents."""
 
-    def __init__(self, target_size: int = 2500, overlap: int = 200, preserve_tables: bool = True):
+    def __init__(
+        self,
+        target_size: int = 2500,
+        overlap: int = 200,
+        preserve_tables: bool = True,
+        pdf_path: Optional[Path] = None,
+    ):
         """Initialize chunker.
 
         Args:
             target_size: Target chunk size in characters
             overlap: Overlap between adjacent text chunks (in characters, used as budget for trailing sentences)
             preserve_tables: Keep register tables intact (never split)
+            pdf_path: Source PDF path. When provided, "Table N." sections
+                use pdfplumber to recover the column-header row so the
+                header gets prepended to every body chunk -- without it
+                a search hit landing in the middle of a 30-page table
+                gives only opaque rows.
         """
         self.target_size = target_size
         self.overlap = overlap
         self.preserve_tables = preserve_tables
+        self.pdf_path = pdf_path
 
     def chunk_document(
         self,
@@ -212,9 +254,20 @@ class SemanticChunker:
                 if not content:
                     continue
 
-                if len(prefix) + len(content) <= self.target_size:
-                    # Fits in a single chunk
-                    chunk_text = prefix + content
+                # For "Table N." sections, prepend column-header context to
+                # the prefix so each split chunk carries the header. Falls
+                # back to bare prefix if pdf_path isn't set or pdfplumber
+                # can't find a sensible table on the section's pages.
+                effective_prefix = prefix
+                if _TABLE_SECTION_TITLE_RE.match(section.title):
+                    header = self._extract_table_header(section)
+                    if header:
+                        effective_prefix = prefix + header + "\n"
+
+                if len(effective_prefix) + len(content) <= self.target_size:
+                    chunk_text = effective_prefix + content
+                    if _is_toc_chunk(chunk_text):
+                        continue
                     chunk_hash = hashlib.md5(chunk_text.encode()).hexdigest()[:12]
 
                     chunk = Chunk(
@@ -234,9 +287,16 @@ class SemanticChunker:
                 else:
                     # Large section — split with sentence-aware boundaries
                     split_chunks = self._split_section(
-                        doc_id, section, prefix
+                        doc_id, section, effective_prefix
                     )
-                    chunks.extend(split_chunks)
+                    # Drop any split chunks dominated by TOC dot-leader
+                    # patterns. The bootloader doc, for instance, has the
+                    # very first TOC entry "Table 1. Applicable products"
+                    # at page 2 with the next entry at page 27 -- so the
+                    # section's content slice is 25 pages of TOC plus the
+                    # actual table. The TOC chunks contain only entries
+                    # like "33.1 Bootloader configuration ........ 158".
+                    chunks.extend(c for c in split_chunks if not _is_toc_chunk(c.text))
 
         return chunks
 
@@ -250,6 +310,49 @@ class SemanticChunker:
     def _clean_section_label(cls, title: str) -> str:
         """Strip leading section numbers (e.g. '4.9 FLASH registers' -> 'FLASH registers')."""
         return cls._SECTION_NUMBER_RE.sub("", title).strip()
+
+    def _extract_table_header(self, section: Section) -> Optional[str]:
+        """Pull the column-header row of a "Table N." section via pdfplumber.
+
+        Returns a one-line summary like ``Columns: A | B | C`` or None if
+        no PDF path is configured, the page can't be parsed, or no table
+        is found. Errors are swallowed -- a missing header just means the
+        body chunks ship without the column hint, which is no worse than
+        the prior behavior.
+        """
+        if self.pdf_path is None:
+            return None
+        try:
+            import pdfplumber
+        except ImportError:
+            return None
+
+        try:
+            with pdfplumber.open(self.pdf_path) as pdf:
+                # Probe the first 1-2 pages of the section. A multi-page
+                # table's header lives on the first page; later pages
+                # often repeat it but pdfplumber can mis-detect there.
+                last = min(section.start_page + 1, len(pdf.pages) - 1)
+                for page_idx in range(section.start_page, last + 1):
+                    page = pdf.pages[page_idx]
+                    tables = page.extract_tables()
+                    if not tables:
+                        continue
+                    # Pick the table with the most columns -- that's the
+                    # one that most resembles a labeled data table rather
+                    # than an inline two-column note.
+                    best = max(tables, key=lambda t: len(t[0]) if t and t[0] else 0)
+                    if not best or not best[0]:
+                        continue
+                    header_cells = [
+                        " ".join(str(c).split()) for c in best[0] if c and str(c).strip()
+                    ]
+                    if len(header_cells) < 2:
+                        continue
+                    return "Columns: " + " | ".join(header_cells)
+        except Exception:
+            return None
+        return None
 
     @staticmethod
     def _merge_table_subsection_content(section: Section) -> str:
