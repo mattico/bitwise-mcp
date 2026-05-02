@@ -201,6 +201,17 @@ def _cli_group():
 
         con = sqlite3.connect(db_path)
         con.row_factory = sqlite3.Row
+
+        # SQLite FTS5 with content='chunks' uses external-content rowids.
+        # After enough INSERT OR REPLACE / DELETE rounds (re-ingest, remove)
+        # the FTS5 side ends up with stale rowid pointers and every query
+        # raises "fts5: missing row N from content table 'chunks'", which
+        # propagates as an empty keyword side and looks like the doc isn't
+        # indexed at all. The built-in rebuild command repairs it.
+        click.echo("Rebuilding FTS5 keyword index...", err=True)
+        con.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+        con.commit()
+
         rows = list(con.execute("SELECT id, text FROM chunks ORDER BY rowid"))
         con.close()
 
