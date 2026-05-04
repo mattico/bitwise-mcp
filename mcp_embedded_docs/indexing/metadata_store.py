@@ -175,29 +175,108 @@ class MetadataStore:
         """
         cursor = self.conn.cursor()
 
-        if doc_filter:
-            cursor.execute("""
-                SELECT chunks_fts.id, rank
-                FROM chunks_fts
-                JOIN chunks ON chunks_fts.id = chunks.id
-                WHERE chunks_fts MATCH ? AND chunks.doc_id = ?
-                ORDER BY rank
-                LIMIT ?
-            """, (query, doc_filter, top_k))
-        else:
-            cursor.execute("""
-                SELECT id, rank
-                FROM chunks_fts
-                WHERE chunks_fts MATCH ?
-                ORDER BY rank
-                LIMIT ?
-            """, (query, top_k))
+        def _tokens(text: str) -> List[str]:
+            return [tok for tok in text.strip().split() if tok]
 
-        results = []
-        for row in cursor.fetchall():
-            # Convert rank to a score (FTS5 rank is negative)
-            score = abs(float(row['rank']))
-            results.append((row['id'], score))
+        def _is_literal_token(tok: str) -> bool:
+            # Hex addresses and tokens with punctuation are best searched as
+            # exact phrases in FTS and via LIKE fallback.
+            if tok.lower().startswith("0x"):
+                return True
+            return any(ch in tok for ch in ":./_-[]()")
+
+        def _build_fts_query(raw: str) -> str:
+            # Build a robust MATCH expression that preserves literal tokens.
+            parts = []
+            for tok in _tokens(raw):
+                escaped = tok.replace('"', '""')
+                if _is_literal_token(tok):
+                    parts.append(f'"{escaped}"')
+                else:
+                    parts.append(escaped)
+            return " AND ".join(parts)
+
+        def _run_fts(match_query: str) -> List[Tuple[str, float]]:
+            if doc_filter:
+                cursor.execute("""
+                    SELECT chunks_fts.id, rank
+                    FROM chunks_fts
+                    JOIN chunks ON chunks_fts.id = chunks.id
+                    WHERE chunks_fts MATCH ? AND chunks.doc_id = ?
+                    ORDER BY rank
+                    LIMIT ?
+                """, (match_query, doc_filter, top_k))
+            else:
+                cursor.execute("""
+                    SELECT id, rank
+                    FROM chunks_fts
+                    WHERE chunks_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                """, (match_query, top_k))
+
+            rows = cursor.fetchall()
+            out: List[Tuple[str, float]] = []
+            for row in rows:
+                # rank is negative; higher abs(rank) implies better relevance.
+                out.append((row["id"], abs(float(row["rank"]))))
+            return out
+
+        def _run_literal_fallback() -> List[Tuple[str, float]]:
+            # Fallback path for queries rich in literal/address tokens that
+            # may not tokenize cleanly under FTS5.
+            toks = _tokens(query)
+            if not toks:
+                return []
+
+            clauses = []
+            params: List[Any] = []
+            for tok in toks:
+                clauses.append("text LIKE ?")
+                params.append(f"%{tok}%")
+
+            where = " AND ".join(clauses)
+            if doc_filter:
+                sql = f"""
+                    SELECT id, text
+                    FROM chunks
+                    WHERE doc_id = ? AND {where}
+                    LIMIT ?
+                """
+                cursor.execute(sql, [doc_filter, *params, top_k])
+            else:
+                sql = f"""
+                    SELECT id, text
+                    FROM chunks
+                    WHERE {where}
+                    LIMIT ?
+                """
+                cursor.execute(sql, [*params, top_k])
+
+            rows = cursor.fetchall()
+            # Synthetic score: prioritize rows containing more literal tokens.
+            scored: List[Tuple[str, float]] = []
+            lowered = [t.lower() for t in toks]
+            for row in rows:
+                text = (row["text"] or "").lower()
+                hits = sum(1 for t in lowered if t in text)
+                scored.append((row["id"], float(hits)))
+
+            scored.sort(key=lambda x: x[1], reverse=True)
+            return scored
+
+        try:
+            fts_query = _build_fts_query(query)
+            results = _run_fts(fts_query) if fts_query else []
+        except sqlite3.OperationalError:
+            # If MATCH parsing fails, degrade gracefully to literal fallback.
+            results = []
+
+        # If FTS returns nothing and query looks literal-heavy, fallback to a
+        # deterministic LIKE path that can recover address/table rows.
+        literal_tokens = [tok for tok in _tokens(query) if _is_literal_token(tok)]
+        if not results and literal_tokens:
+            results = _run_literal_fallback()
 
         return results
 

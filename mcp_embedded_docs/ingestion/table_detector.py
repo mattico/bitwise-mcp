@@ -117,9 +117,13 @@ class TableDetector:
                 if self._is_likely_table_header(header_keywords):
                     table_type = self._classify_table_type(header_keywords)
 
+                    bbox = self._extract_pdfplumber_table_bbox(table)
+                    if bbox is None:
+                        continue
+
                     region = TableRegion(
                         page_num=page.page_num,
-                        bbox=tuple(table.bbox),
+                        bbox=bbox,
                         table_type=table_type,
                         header_keywords=header_keywords,
                         table_index=table_idx,
@@ -130,6 +134,48 @@ class TableDetector:
                 pdf.close()
 
         return out
+
+    @staticmethod
+    def _extract_pdfplumber_table_bbox(table: object) -> Optional[Tuple[float, float, float, float]]:
+        """Extract a table bbox across pdfplumber versions.
+
+        Some versions expose ``table.bbox`` directly, while others keep
+        tuple-based ``table.cells`` where accessing ``bbox`` may raise due
+        to internal assumptions about cell object shape.
+        """
+        # Preferred path when available and stable.
+        try:
+            raw_bbox = getattr(table, "bbox", None)
+            if raw_bbox is not None:
+                vals = tuple(raw_bbox)
+                if len(vals) == 4:
+                    return vals  # type: ignore[return-value]
+        except Exception:
+            pass
+
+        # Fallback: compute from tuple-like cells.
+        cells = getattr(table, "cells", None)
+        if not cells:
+            return None
+
+        coords = []
+        for cell in cells:
+            if isinstance(cell, (tuple, list)) and len(cell) >= 4:
+                try:
+                    x0, y0, x1, y1 = float(cell[0]), float(cell[1]), float(cell[2]), float(cell[3])
+                except (TypeError, ValueError):
+                    continue
+                coords.append((x0, y0, x1, y1))
+
+        if not coords:
+            return None
+
+        return (
+            min(c[0] for c in coords),
+            min(c[1] for c in coords),
+            max(c[2] for c in coords),
+            max(c[3] for c in coords),
+        )
 
     def _group_blocks_into_rows(self, blocks: List[TextBlock], tolerance: float = 5.0) -> List[List[TextBlock]]:
         """Group text blocks into rows based on y-coordinate."""

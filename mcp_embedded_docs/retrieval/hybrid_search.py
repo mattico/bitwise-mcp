@@ -129,8 +129,13 @@ class HybridSearch:
             # Embed query
             query_vector = self.embedder.embed_query(query)
 
-            # Search vector store
-            results = self.vector_store.search(query_vector, top_k)
+            # Search vector store. When filtering by doc_id, fetch a wider
+            # candidate pool first so post-filtering doesn't starve results.
+            search_k = top_k
+            if doc_filter:
+                search_k = min(max(top_k * 12, 200), max(len(self.vector_store), top_k))
+
+            results = self.vector_store.search(query_vector, search_k)
 
             # Filter by document if requested
             if doc_filter:
