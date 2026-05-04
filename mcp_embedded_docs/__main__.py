@@ -3,20 +3,27 @@
 import logging
 import os
 import sys
+import time
+
+
+def _configure_logging():
+    """Configure stderr logging for CLI and MCP server runs."""
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
+    logging.getLogger("mcp_embedded_docs").setLevel(
+        logging.DEBUG if os.getenv("BITWISE_MCP_DEBUG") else logging.INFO
+    )
 
 
 def _run_server():
     """Run MCP server directly, bypassing Click to avoid stdin/stdout interference."""
     # Route logs to stderr so the MCP host (Claude Code, VSCode) can surface
-    # them. stdout is reserved for the JSON-RPC protocol -- logging there
-    # would corrupt the stream. BITWISE_MCP_DEBUG=1 raises the level to DEBUG
-    # for deeper investigation.
-    level = logging.DEBUG if os.getenv("BITWISE_MCP_DEBUG") else logging.INFO
-    logging.basicConfig(
-        level=level,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    # them. stdout is reserved for the JSON-RPC protocol.
+    _configure_logging()
     from .server import mcp
     mcp.run(transport="stdio")
 
@@ -51,7 +58,7 @@ def _cli_group():
     @click.group()
     def _cli():
         """MCP Embedded Documentation Server CLI."""
-        pass
+        _configure_logging()
 
     @_cli.command()
     @click.argument('pdf_path', type=click.Path(exists=True))
@@ -71,16 +78,25 @@ def _cli_group():
         """Index a PDF document."""
         pdf_path = Path(pdf_path)
         config = Config.load()
+        overall_start = time.perf_counter()
 
         click.echo(f"Ingesting {pdf_path.name}...", err=True)
 
         doc_id = hashlib.md5(pdf_path.name.encode()).hexdigest()[:16]
 
         click.echo("Parsing PDF...", err=True)
+        parse_start = time.perf_counter()
         with PDFParser(pdf_path) as parser:
             pages = parser.extract_text_with_layout()
             toc = parser.extract_toc()
             sections = parser.detect_sections(pages, toc)
+        logger.debug(
+            "Parsed %s into %d pages / %d sections in %.2fs",
+            pdf_path.name,
+            len(pages),
+            len(sections),
+            time.perf_counter() - parse_start,
+        )
 
         click.echo(f"  Extracted {len(pages)} pages, {len(sections)} sections", err=True)
 
@@ -90,6 +106,7 @@ def _cli_group():
             click.echo("Skipping register-table detection (--no-tables).", err=True)
         else:
             click.echo(f"Detecting register tables across {len(pages)} pages...", err=True)
+            table_start = time.perf_counter()
             extractor = TableExtractor(str(pdf_path))
 
             with TableDetector(str(pdf_path)) as detector:
@@ -105,8 +122,14 @@ def _cli_group():
                             all_tables.append(table)
 
             click.echo(f"  Found {len(all_tables)} register tables", err=True)
+            logger.debug(
+                "Detected %d register tables in %.2fs",
+                len(all_tables),
+                time.perf_counter() - table_start,
+            )
 
         click.echo("Creating semantic chunks...", err=True)
+        chunk_start = time.perf_counter()
         chunker = SemanticChunker(
             target_size=config.chunking.target_size,
             overlap=config.chunking.overlap,
@@ -121,6 +144,7 @@ def _cli_group():
             table_pages=table_pages,
         )
         click.echo(f"  Created {len(chunks)} chunks", err=True)
+        logger.debug("Created %d chunks in %.2fs", len(chunks), time.perf_counter() - chunk_start)
 
         click.echo("Indexing...", err=True)
         embedder = LocalEmbedder(
@@ -172,6 +196,7 @@ def _cli_group():
         click.echo(f"  Document ID: {doc_id}", err=True)
         click.echo(f"  Total chunks: {len(chunks)}", err=True)
         click.echo(f"  Register tables: {len(all_tables)}", err=True)
+        logger.debug("Completed ingest for %s in %.2fs", pdf_path.name, time.perf_counter() - overall_start)
 
     @_cli.command()
     def serve():

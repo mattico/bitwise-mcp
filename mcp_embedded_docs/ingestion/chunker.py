@@ -1,7 +1,9 @@
 """Semantic chunking for documents."""
 
 import hashlib
+import logging
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -9,6 +11,8 @@ from typing import List, Dict, Any, Optional
 from .pdf_parser import Section
 from .st_extractor import parse_register_section
 from .table_extractor import RegisterTable
+
+logger = logging.getLogger(__name__)
 
 # Sentence boundary pattern: period/question/exclamation followed by space or newline,
 # or a double newline (paragraph break)
@@ -83,6 +87,7 @@ class SemanticChunker:
         self.overlap = overlap
         self.preserve_tables = preserve_tables
         self.pdf_path = pdf_path
+        self._header_pdf = None
 
     def chunk_document(
         self,
@@ -104,16 +109,33 @@ class SemanticChunker:
         Returns:
             List of chunks
         """
+        start_time = time.perf_counter()
         chunks = []
+        header_pdf = self._open_header_pdf()
+        if header_pdf is not None:
+            self._header_pdf = header_pdf
 
-        # First, create chunks for register tables (these are always kept intact)
-        table_chunks = self._chunk_tables(doc_id, tables, doc_title, table_pages or {})
-        chunks.extend(table_chunks)
+        try:
+            # First, create chunks for register tables (these are always kept intact)
+            table_chunks = self._chunk_tables(doc_id, tables, doc_title, table_pages or {})
+            chunks.extend(table_chunks)
 
-        # Then, create chunks for text sections (starting with no ancestors)
-        text_chunks = self._chunk_sections(doc_id, sections, doc_title, ancestors=[])
-        chunks.extend(text_chunks)
+            # Then, create chunks for text sections (starting with no ancestors)
+            text_chunks = self._chunk_sections(doc_id, sections, doc_title, ancestors=[])
+            chunks.extend(text_chunks)
+        finally:
+            if self._header_pdf is not None:
+                self._header_pdf.close()
+                self._header_pdf = None
 
+        logger.debug(
+            "Chunked %s into %d chunks in %.2fs (%d table chunks, %d text chunks)",
+            doc_title or doc_id,
+            len(chunks),
+            time.perf_counter() - start_time,
+            len(table_chunks),
+            len(text_chunks),
+        )
         return chunks
 
     # ------------------------------------------------------------------
@@ -212,6 +234,7 @@ class SemanticChunker:
         chunks = []
 
         for section in sections:
+            section_start = time.perf_counter()
             current_hierarchy = ancestors + [section.title]
             prefix = self._build_context_prefix(doc_title, current_hierarchy)
 
@@ -298,6 +321,17 @@ class SemanticChunker:
                     # like "33.1 Bootloader configuration ........ 158".
                     chunks.extend(c for c in split_chunks if not _is_toc_chunk(c.text))
 
+            elapsed = time.perf_counter() - section_start
+            if logger.isEnabledFor(logging.DEBUG) and (elapsed >= 0.25 or _TABLE_SECTION_TITLE_RE.match(section.title)):
+                logger.debug(
+                    "Chunked section %r (pages %d-%d, subsections=%d) in %.2fs",
+                    section.title,
+                    section.start_page,
+                    section.end_page,
+                    len(section.subsections),
+                    elapsed,
+                )
+
         return chunks
 
     # ------------------------------------------------------------------
@@ -327,31 +361,61 @@ class SemanticChunker:
         except ImportError:
             return None
 
+        start_time = time.perf_counter()
+        pdf = self._header_pdf
+        should_close = False
+        if pdf is None:
+            try:
+                pdf = pdfplumber.open(self.pdf_path)
+                should_close = True
+            except Exception:
+                logger.exception("Failed to open PDF while extracting table header for %r", section.title)
+                return None
+
         try:
-            with pdfplumber.open(self.pdf_path) as pdf:
-                # Probe the first 1-2 pages of the section. A multi-page
-                # table's header lives on the first page; later pages
-                # often repeat it but pdfplumber can mis-detect there.
-                last = min(section.start_page + 1, len(pdf.pages) - 1)
-                for page_idx in range(section.start_page, last + 1):
-                    page = pdf.pages[page_idx]
-                    tables = page.extract_tables()
-                    if not tables:
-                        continue
-                    # Pick the table with the most columns -- that's the
-                    # one that most resembles a labeled data table rather
-                    # than an inline two-column note.
-                    best = max(tables, key=lambda t: len(t[0]) if t and t[0] else 0)
-                    if not best or not best[0]:
-                        continue
-                    header_cells = [
-                        " ".join(str(c).split()) for c in best[0] if c and str(c).strip()
-                    ]
-                    if len(header_cells) < 2:
-                        continue
-                    return "Columns: " + " | ".join(header_cells)
+            # Probe the first 1-2 pages of the section. A multi-page
+            # table's header lives on the first page; later pages
+            # often repeat it but pdfplumber can mis-detect there.
+            last = min(section.start_page + 1, len(pdf.pages) - 1)
+            for page_idx in range(section.start_page, last + 1):
+                page = pdf.pages[page_idx]
+                tables = page.extract_tables()
+                if not tables:
+                    continue
+                # Pick the table with the most columns -- that's the
+                # one that most resembles a labeled data table rather
+                # than an inline two-column note.
+                best = max(tables, key=lambda t: len(t[0]) if t and t[0] else 0)
+                if not best or not best[0]:
+                    continue
+                header_cells = [
+                    " ".join(str(c).split()) for c in best[0] if c and str(c).strip()
+                ]
+                if len(header_cells) < 2:
+                    continue
+                header = "Columns: " + " | ".join(header_cells)
+                logger.debug(
+                    "Extracted table header for %r from pages %d-%d in %.2fs",
+                    section.title,
+                    section.start_page,
+                    last,
+                    time.perf_counter() - start_time,
+                )
+                return header
         except Exception:
+            logger.exception("Failed while extracting table header for %r", section.title)
             return None
+        finally:
+            if should_close:
+                pdf.close()
+
+        logger.debug(
+            "No table header found for %r on pages %d-%d after %.2fs",
+            section.title,
+            section.start_page,
+            min(section.start_page + 1, len(pdf.pages) - 1),
+            time.perf_counter() - start_time,
+        )
         return None
 
     @staticmethod
@@ -576,3 +640,18 @@ class SemanticChunker:
                 for reg in table.registers
             ]
         }
+    def _open_header_pdf(self):
+        """Open a shared pdfplumber handle for table-header extraction."""
+        if self.pdf_path is None:
+            return None
+        try:
+            import pdfplumber
+        except ImportError:
+            return None
+
+        try:
+            logger.debug("Opening shared pdfplumber handle for table-header extraction: %s", self.pdf_path)
+            return pdfplumber.open(self.pdf_path)
+        except Exception:
+            logger.exception("Failed to open pdfplumber for table-header extraction: %s", self.pdf_path)
+            return None

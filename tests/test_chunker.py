@@ -10,6 +10,10 @@ exists in the source PDF.
 
 from __future__ import annotations
 
+import sys
+import types
+from pathlib import Path
+
 from mcp_embedded_docs.ingestion.chunker import SemanticChunker, _is_toc_chunk
 from mcp_embedded_docs.ingestion.pdf_parser import Section
 
@@ -204,3 +208,57 @@ def test_chunker_does_not_also_emit_text_chunk_for_register_subsection():
         "register-as-non-leaf should suppress recursion into the Table N "
         f"subsection, but got text chunks: {[c.metadata.get('section_title') for c in text_chunks]}"
     )
+
+
+def test_chunker_reuses_pdf_handle_for_table_header_extraction(monkeypatch):
+    open_calls = 0
+
+    class FakePage:
+        def extract_tables(self):
+            return [[["Column A", "Column B"], ["v1", "v2"]]]
+
+    class FakePdf:
+        def __init__(self):
+            self.pages = [FakePage(), FakePage(), FakePage()]
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    def fake_open(_path):
+        nonlocal open_calls
+        open_calls += 1
+        return FakePdf()
+
+    monkeypatch.setitem(sys.modules, "pdfplumber", types.SimpleNamespace(open=fake_open))
+
+    chunker = SemanticChunker(target_size=400, pdf_path=Path("fake.pdf"))
+    sections = [
+        Section(
+            title="Table 1. Example table",
+            level=1,
+            start_page=0,
+            end_page=0,
+            content="alpha beta gamma",
+            subsections=[],
+        ),
+        Section(
+            title="Table 2. Another table",
+            level=1,
+            start_page=1,
+            end_page=1,
+            content="delta epsilon zeta",
+            subsections=[],
+        ),
+    ]
+
+    chunks = chunker.chunk_document(
+        doc_id="d",
+        sections=sections,
+        tables=[],
+        doc_title="Doc",
+    )
+
+    assert open_calls == 1
+    assert len(chunks) == 2
+    assert all("Columns: Column A | Column B" in chunk.text for chunk in chunks)
