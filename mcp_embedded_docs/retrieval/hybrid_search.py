@@ -1,51 +1,139 @@
 """Hybrid search combining keyword and semantic search."""
 
 import logging
+import sqlite3
+import threading
 import time
-from typing import List, Optional, Dict, Tuple
-from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from ..indexing.embedder import LocalEmbedder
-from ..indexing.vector_store import VectorStore
-from ..indexing.metadata_store import MetadataStore
 from ..config import Config
-from . import SearchResult
+from ..indexing.metadata_store import KeywordResult, MetadataStore, section_path
+from . import SearchResponse, SearchResult
+from .query import terms_of
 
+if TYPE_CHECKING:
+    from ..indexing.embedder import LocalEmbedder
+    from ..indexing.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
+
+# Reciprocal-rank-fusion constant; 60 is the customary value and keeps one
+# channel's top hit from drowning out agreement between the two.
+RRF_K = 60
+# How long a search waits for the embedding model before answering from the
+# keyword index alone. Loading starts at server start, so only a search in
+# the first seconds (or a cold, slow disk) ever waits.
+EMBEDDER_WAIT_SECONDS = 20.0
 
 
 class HybridSearch:
     """Hybrid search engine combining keyword and semantic search."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, load_embedder: bool = True):
         """Initialize hybrid search.
+
+        Opens the keyword index and vector file immediately; the embedding
+        model loads on a background thread (see ensure_embedder).
 
         Args:
             config: Configuration object
+            load_embedder: Start loading the embedding model right away
         """
         self.config = config
-
-        t0 = time.perf_counter()
-        self.embedder = LocalEmbedder(
-            model_name=config.embeddings.model,
-            device=config.embeddings.device
-        )
-        logger.info("embedder loaded in %.2fs (model=%s)", time.perf_counter() - t0, config.embeddings.model)
-
         index_dir = config.index.directory
-        self.vector_store = VectorStore(dimension=self.embedder.dimension)
+
         t0 = time.perf_counter()
         self.metadata_store = MetadataStore(index_dir / config.index.metadata_db)
-        logger.info("metadata store opened in %.2fs (path=%s)", time.perf_counter() - t0, index_dir / config.index.metadata_db)
+        logger.info("metadata store opened in %.2fs (path=%s)",
+                    time.perf_counter() - t0, index_dir / config.index.metadata_db)
 
-        vector_path = index_dir / config.index.vector_file
-        if vector_path.exists():
-            t0 = time.perf_counter()
-            self.vector_store.load(vector_path)
-            logger.info("vector store loaded in %.2fs (path=%s)", time.perf_counter() - t0, vector_path)
-        else:
+        self.vector_store: Optional["VectorStore"] = None
+        self.embedder: Optional["LocalEmbedder"] = None
+        self._embedder_error: Optional[str] = None
+        self._embedder_ready = threading.Event()
+        self._embedder_thread: Optional[threading.Thread] = None
+        self._embed_lock = threading.Lock()
+        self._doc_titles: Dict[str, str] = {}
+
+        self.semantic_status = self._load_vectors()
+        self._refresh_doc_titles()
+        if load_embedder and self.vector_store is not None:
+            self.ensure_embedder(wait=0)
+
+    # ------------------------------------------------------------ lifecycle
+
+    def _load_vectors(self) -> str:
+        """Load the FAISS file; returns 'on' or why semantic search is off."""
+        if not self.config.embeddings.enabled:
+            self.vector_store = None
+            return "off (embeddings.enabled is false)"
+        vector_path = self.config.index.directory / self.config.index.vector_file
+        if not vector_path.exists():
             logger.warning("vector store not found at %s; semantic search disabled", vector_path)
+            self.vector_store = None
+            return "off (no vector index; run rebuild-vectors)"
+        try:
+            from ..indexing.vector_store import VectorStore
+
+            t0 = time.perf_counter()
+            store = VectorStore()
+            store.load(vector_path)
+            self.vector_store = store
+            logger.info("vector store loaded in %.2fs (%d vectors)",
+                        time.perf_counter() - t0, len(store))
+            return "on"
+        except Exception as exc:  # noqa: BLE001 - keyword search still works
+            logger.exception("could not load vector store")
+            self.vector_store = None
+            return f"off (vector index unreadable: {exc})"
+
+    def _refresh_doc_titles(self):
+        self._doc_titles = {
+            d["id"]: d["title"] or d["filename"] for d in self.metadata_store.list_documents()
+        }
+
+    def reload(self):
+        """Pick up changes written by an ingest or remove."""
+        self.semantic_status = self._load_vectors()
+        self._refresh_doc_titles()
+        if self.vector_store is not None:
+            self.ensure_embedder(wait=0)
+
+    def ensure_embedder(self, wait: float = EMBEDDER_WAIT_SECONDS) -> bool:
+        """Start loading the embedding model if needed; wait up to `wait` seconds.
+
+        Returns:
+            True when the model is ready
+        """
+        if self._embedder_ready.is_set():
+            return self.embedder is not None
+        with self._embed_lock:
+            if self._embedder_thread is None:
+                self._embedder_thread = threading.Thread(
+                    target=self._load_embedder, name="embedder-load", daemon=True)
+                self._embedder_thread.start()
+        if wait:
+            self._embedder_ready.wait(wait)
+        return self.embedder is not None
+
+    def _load_embedder(self):
+        try:
+            t0 = time.perf_counter()
+            from ..indexing.embedder import LocalEmbedder
+
+            self.embedder = LocalEmbedder(
+                model_name=self.config.embeddings.model,
+                device=self.config.embeddings.device,
+            )
+            logger.info("embedder loaded in %.2fs (model=%s)",
+                        time.perf_counter() - t0, self.config.embeddings.model)
+        except Exception as exc:  # noqa: BLE001 - keyword search still works
+            logger.exception("could not load embedding model")
+            self._embedder_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            self._embedder_ready.set()
+
+    # ------------------------------------------------------------ search
 
     def search(
         self,
@@ -63,135 +151,150 @@ class HybridSearch:
         Returns:
             List of search results sorted by relevance
         """
+        return self.search_ex(query, top_k, doc_filter).results
+
+    def search_ex(self, query: str, top_k: int = 5,
+                  doc_filter: Optional[str] = None) -> SearchResponse:
+        """Hybrid search returning results plus how the query was run."""
         t_start = time.perf_counter()
-        logger.info("search start query=%r top_k=%d doc_filter=%s", query, top_k, doc_filter)
+        top_k = max(1, top_k)
+        # Over-fetch: several chunks of one section collapse into one result.
+        # A fixed floor keeps ranking independent of top_k for typical calls.
+        pool = max(30, top_k * 3)
+        response = SearchResponse(query=query, results=[])
 
         t0 = time.perf_counter()
-        keyword_results = self._keyword_search(query, top_k * 2, doc_filter)
+        try:
+            kw = self.metadata_store.keyword_search_ex(query, pool, doc_filter)
+        except sqlite3.Error as exc:
+            logger.exception("keyword search failed")
+            kw = KeywordResult(mode="error", terms=terms_of(query))
+            response.notes.append(
+                f"keyword index error ({exc}); results are semantic only. "
+                "`mcp-embedded-docs rebuild-vectors` rebuilds the keyword index.")
         t_kw = time.perf_counter() - t0
+        response.terms = kw.terms
+        response.keyword_mode = kw.mode or "no match"
+        if kw.note:
+            response.notes.append(kw.note)
 
         t0 = time.perf_counter()
-        semantic_results = self._semantic_search(query, top_k * 2, doc_filter)
+        semantic_ids, response.semantic = self._semantic_search(query, pool, doc_filter)
         t_sem = time.perf_counter() - t0
 
-        t0 = time.perf_counter()
-        combined = self._combine_results(keyword_results, semantic_results)
+        if not kw.hits and semantic_ids:
+            response.notes.append(
+                "no chunk contains these terms; the hits below are nearest neighbours by "
+                "meaning only and may be unrelated. Try the manual's own wording.")
 
-        results = []
-        for chunk_id, score in combined[:top_k]:
-            chunk_data = self.metadata_store.get_chunk(chunk_id)
-            if chunk_data:
-                results.append(SearchResult(
-                    chunk_id=chunk_id,
-                    score=score,
-                    text=chunk_data["text"],
-                    structured_data=chunk_data.get("structured_data"),
-                    metadata=chunk_data.get("metadata", {}),
-                    doc_id=chunk_data["doc_id"],
-                    page_start=chunk_data["page_start"],
-                    page_end=chunk_data["page_end"]
-                ))
+        t0 = time.perf_counter()
+        fused = self._fuse([cid for cid, _ in kw.hits], semantic_ids)
+        response.results = self._collapse(fused, top_k)
         t_fetch = time.perf_counter() - t0
 
         logger.info(
-            "search done in %.3fs (keyword=%.3fs semantic=%.3fs fetch=%.3fs, %d results)",
-            time.perf_counter() - t_start, t_kw, t_sem, t_fetch, len(results),
+            "search %r done in %.3fs (keyword=%.3fs/%d %s, semantic=%.3fs/%d %s, fetch=%.3fs)",
+            query, time.perf_counter() - t_start, t_kw, len(kw.hits), response.keyword_mode,
+            t_sem, len(semantic_ids), response.semantic, t_fetch,
         )
+        return response
+
+    def _semantic_search(self, query: str, top_k: int,
+                         doc_filter: Optional[str]) -> Tuple[List[str], str]:
+        """Chunk ids by embedding similarity, and the semantic channel's status."""
+        store = self.vector_store
+        if store is None:
+            return [], self.semantic_status
+        if not self.ensure_embedder() or self.embedder is None:
+            if self._embedder_error:
+                return [], f"off (model failed to load: {self._embedder_error})"
+            return [], "skipped (model still loading; keyword results only)"
+        try:
+            vector = self.embedder.embed_query(query)  # thread-safe
+            prefix = f"{doc_filter}_" if doc_filter else None
+            return [cid for cid, _ in store.search(vector, top_k, id_prefix=prefix)], "on"
+        except Exception as exc:  # noqa: BLE001 - keyword results still useful
+            logger.exception("semantic search failed")
+            return [], f"failed ({exc})"
+
+    def _fuse(self, keyword_ids: List[str], semantic_ids: List[str]) -> List[Tuple[str, float, List[str]]]:
+        """Weighted reciprocal-rank fusion: [(chunk_id, score, channels)], best first."""
+        weights = (("keyword", keyword_ids, self.config.search.keyword_weight),
+                   ("semantic", semantic_ids, self.config.search.semantic_weight))
+        scores: Dict[str, float] = {}
+        channels: Dict[str, List[str]] = {}
+        for name, ids, weight in weights:
+            for rank, cid in enumerate(ids, 1):
+                scores[cid] = scores.get(cid, 0.0) + weight / (RRF_K + rank)
+                channels.setdefault(cid, []).append(name)
+        ordered = sorted(scores, key=lambda c: scores[c], reverse=True)
+        return [(cid, scores[cid], channels[cid]) for cid in ordered]
+
+    def _collapse(self, fused: List[Tuple[str, float, List[str]]], top_k: int) -> List[SearchResult]:
+        """Materialize results, merging chunks of the same section into the best one."""
+        chunks = self.metadata_store.get_chunks([cid for cid, _, _ in fused])
+        results: List[SearchResult] = []
+        by_section: Dict[Tuple[str, str], SearchResult] = {}
+        for cid, score, chans in fused:
+            chunk = chunks.get(cid)
+            if chunk is None:  # a vector whose chunk was removed
+                continue
+            section = section_path(chunk["text"]) or chunk.get("section_hierarchy")
+            key = (chunk["doc_id"], section) if section else (chunk["doc_id"], cid)
+            if key in by_section:
+                best = by_section[key]
+                best.more_in_section += 1
+                for ch in chans:
+                    if ch not in best.channels:
+                        best.channels.append(ch)
+                continue
+            if len(results) >= top_k:
+                continue  # still counting collapsed siblings of kept results
+            result = self._to_result(chunk, score)
+            result.channels = list(chans)
+            by_section[key] = result
+            results.append(result)
         return results
 
-    def _keyword_search(
-        self,
-        query: str,
-        top_k: int,
-        doc_filter: Optional[str]
-    ) -> List[Tuple[str, float]]:
-        """Perform keyword search using FTS5."""
-        try:
-            results = self.metadata_store.keyword_search(query, top_k, doc_filter)
-            # Normalize scores to 0-1 range (FTS5 scores are negative)
-            if results:
-                max_score = max(score for _, score in results)
-                if max_score > 0:
-                    results = [(chunk_id, score / max_score) for chunk_id, score in results]
-            return results
-        except Exception as e:
-            print(f"Keyword search error: {e}")
-            return []
+    def _to_result(self, chunk: Dict[str, Any], score: float) -> SearchResult:
+        return SearchResult(
+            chunk_id=chunk["id"],
+            score=score,
+            text=chunk["text"],
+            structured_data=chunk.get("structured_data"),
+            metadata=chunk.get("metadata") or {},
+            doc_id=chunk["doc_id"],
+            page_start=chunk["page_start"],
+            page_end=chunk["page_end"],
+            chunk_type=chunk.get("chunk_type") or "text",
+            section=chunk.get("section_hierarchy"),
+            doc_title=self._doc_titles.get(chunk["doc_id"]),
+        )
 
-    def _semantic_search(
-        self,
-        query: str,
-        top_k: int,
-        doc_filter: Optional[str]
-    ) -> List[Tuple[str, float]]:
-        """Perform semantic search using embeddings."""
-        try:
-            # Embed query
-            query_vector = self.embedder.embed_query(query)
+    # ------------------------------------------------------------ lookups
 
-            # Search vector store. When filtering by doc_id, fetch a wider
-            # candidate pool first so post-filtering doesn't starve results.
-            search_k = top_k
-            if doc_filter:
-                search_k = min(max(top_k * 12, 200), max(len(self.vector_store), top_k))
+    def resolve_doc(self, doc: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        """Map a doc id, filename or title fragment to a doc id.
 
-            results = self.vector_store.search(query_vector, search_k)
-
-            # Filter by document if requested
-            if doc_filter:
-                filtered = []
-                for chunk_id, distance in results:
-                    chunk = self.metadata_store.get_chunk(chunk_id)
-                    if chunk and chunk["doc_id"] == doc_filter:
-                        filtered.append((chunk_id, distance))
-                results = filtered
-
-            # Convert distances to similarity scores (lower distance = higher similarity)
-            # For normalized vectors, L2 distance ≈ 2(1 - cosine_similarity)
-            # So similarity ≈ 1 - distance/2
-            results = [(chunk_id, max(0, 1 - distance / 2)) for chunk_id, distance in results]
-
-            return results
-        except Exception as e:
-            print(f"Semantic search error: {e}")
-            return []
-
-    def _combine_results(
-        self,
-        keyword_results: List[Tuple[str, float]],
-        semantic_results: List[Tuple[str, float]]
-    ) -> List[Tuple[str, float]]:
-        """Combine keyword and semantic results with weighted scoring."""
-        keyword_weight = self.config.search.keyword_weight
-        semantic_weight = self.config.search.semantic_weight
-
-        # Build score dictionaries
-        keyword_scores = {chunk_id: score for chunk_id, score in keyword_results}
-        semantic_scores = {chunk_id: score for chunk_id, score in semantic_results}
-
-        # Get all unique chunk IDs
-        all_chunk_ids = set(keyword_scores.keys()) | set(semantic_scores.keys())
-
-        # Compute combined scores
-        combined_scores = []
-        for chunk_id in all_chunk_ids:
-            keyword_score = keyword_scores.get(chunk_id, 0)
-            semantic_score = semantic_scores.get(chunk_id, 0)
-
-            # Weighted combination
-            combined_score = (keyword_weight * keyword_score +
-                            semantic_weight * semantic_score)
-
-            # Boost score if present in both result sets
-            if chunk_id in keyword_scores and chunk_id in semantic_scores:
-                combined_score *= 1.2  # 20% boost for appearing in both
-
-            combined_scores.append((chunk_id, combined_score))
-
-        # Sort by score descending
-        combined_scores.sort(key=lambda x: x[1], reverse=True)
-
-        return combined_scores
+        Returns:
+            (doc_id, None) on success, (None, error message) otherwise
+        """
+        if not doc:
+            return None, None
+        docs = self.metadata_store.list_documents()
+        needle = doc.strip().lower()
+        for d in docs:
+            if d["id"] == doc.strip():
+                return d["id"], None
+        matches = [d for d in docs
+                   if needle in d["filename"].lower() or needle in (d["title"] or "").lower()
+                   or d["id"].startswith(needle)]
+        if len(matches) == 1:
+            return matches[0]["id"], None
+        listing = ", ".join(f"`{d['id']}` ({d['filename']})" for d in (matches or docs))
+        if matches:
+            return None, f"'{doc}' matches several documents: {listing}"
+        return None, f"no indexed document matches '{doc}'. Indexed: {listing}"
 
     def find_register(
         self,
@@ -207,21 +310,22 @@ class HybridSearch:
         Returns:
             Search result containing the register or None
         """
-        chunk_data = self.metadata_store.find_register(name, peripheral)
+        matches = self.find_register_ex(name, peripheral)
+        return matches["results"][0] if matches["kind"] == "exact" else None
 
-        if not chunk_data:
-            return None
+    def find_register_ex(self, name: str, peripheral: Optional[str] = None) -> Dict[str, Any]:
+        """Register lookup tolerant of case and missing prefixes.
 
-        return SearchResult(
-            chunk_id=chunk_data["id"],
-            score=1.0,  # Exact match
-            text=chunk_data["text"],
-            structured_data=chunk_data.get("structured_data"),
-            metadata=chunk_data.get("metadata", {}),
-            doc_id=chunk_data["doc_id"],
-            page_start=chunk_data["page_start"],
-            page_end=chunk_data["page_end"]
-        )
+        Returns:
+            {"kind": "exact"|"ambiguous"|"none", "name", "results", "candidates"}
+        """
+        m = self.metadata_store.find_register_matches(name, peripheral)
+        return {
+            "kind": m["kind"],
+            "name": m["name"],
+            "results": [self._to_result(c, 1.0) for c in m["chunks"]],
+            "candidates": m["candidates"],
+        }
 
     def list_documents(self) -> List[Dict]:
         """List all indexed documents.

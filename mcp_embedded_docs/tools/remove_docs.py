@@ -1,45 +1,54 @@
 """Remove documents tool."""
 
 from typing import Optional
+
 from ..config import Config
-from ..retrieval.hybrid_search import HybridSearch
 
 
-async def remove_docs(doc_id: str, config: Optional[Config] = None) -> str:
-    """Remove a document from the index.
+def remove_docs(doc_id: str, config: Optional[Config] = None) -> str:
+    """Remove a document's chunks and vectors from the index.
+
+    Blocking and cheap: no search engine or embedding model is loaded.
 
     Args:
-        doc_id: Document ID to remove
+        doc_id: Document ID to remove (a filename as listed by list_docs is
+            also accepted)
         config: Configuration object
 
     Returns:
         Status message as markdown
     """
+    from ..ingestion.pipeline import remove_document
+
     if config is None:
         config = Config.load()
 
-    search = HybridSearch(config)
+    report = remove_document(doc_id, config)
+    if report is None:
+        other_id = _doc_id_for_filename(doc_id, config)
+        if other_id:
+            report = remove_document(other_id, config)
+    if report is None:
+        return f"❌ Error: Document not found: {doc_id}"
 
+    return (
+        f"✅ Removed {report.filename} (ID: `{report.doc_id}`): "
+        f"{report.chunks} chunks, {report.vectors} vectors"
+    )
+
+
+def _doc_id_for_filename(name: str, config: Config) -> Optional[str]:
+    """Id of the indexed document whose filename matches `name` (case-insensitive)."""
+    from ..indexing.metadata_store import MetadataStore
+
+    db_path = config.index.directory / config.index.metadata_db
+    if not db_path.exists():
+        return None
+    store = MetadataStore(db_path)
     try:
-        # Get document info before deleting
-        docs = search.list_documents()
-        doc_to_delete = None
-        for doc in docs:
-            if doc['id'] == doc_id:
-                doc_to_delete = doc
-                break
-
-        if not doc_to_delete:
-            return f"❌ Error: Document not found: {doc_id}"
-
-        # Delete from metadata store
-        deleted = search.metadata_store.delete_document(doc_id)
-
-        if deleted:
-            filename = doc_to_delete.get('filename', 'Unknown')
-            return f"✅ Successfully removed document: {filename} (ID: {doc_id})\n\nNote: Vector embeddings remain in the index. Re-ingest other documents to rebuild the vector store if needed."
-        else:
-            return f"❌ Error: Failed to delete document: {doc_id}"
-
+        for doc in store.list_documents():
+            if (doc.get("filename") or "").lower() == name.lower():
+                return doc["id"]
     finally:
-        search.close()
+        store.close()
+    return None

@@ -2,6 +2,7 @@ doc_dirs:
   - ./docs
 
 embeddings:
+  enabled: true            # false = keyword-only search, no torch
   model: "BAAI/bge-small-en-v1.5"
   device: "cpu"
   batch_size: 32
@@ -19,8 +20,8 @@ chunking:
   preserve_tables: true
 
 search:
-  keyword_weight: 0.4
-  semantic_weight: 0.6
+  keyword_weight: 0.5     # reciprocal-rank-fusion weights
+  semantic_weight: 0.5
   top_k_default: 5
 
 index:

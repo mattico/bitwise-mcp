@@ -10,6 +10,9 @@ from pydantic import BaseModel, Field
 
 class EmbeddingsConfig(BaseModel):
     """Embeddings configuration."""
+    # Semantic search on top of keyword search. Off means no torch import, no
+    # model in memory, and ingest skips embedding; keyword search stands alone.
+    enabled: bool = True
     model: str = "BAAI/bge-small-en-v1.5"
     device: str = "cpu"
     batch_size: int = 32
@@ -33,8 +36,9 @@ class ChunkingConfig(BaseModel):
 
 class SearchConfig(BaseModel):
     """Search configuration."""
-    keyword_weight: float = 0.4
-    semantic_weight: float = 0.6
+    # Weights of each channel in reciprocal-rank fusion.
+    keyword_weight: float = 0.5
+    semantic_weight: float = 0.5
     top_k_default: int = 5
 
 
@@ -57,17 +61,32 @@ class Config(BaseModel):
 
     @classmethod
     def load(cls, config_path: Optional[Path] = None) -> "Config":
-        """Load configuration from file or use defaults."""
+        """Load configuration from file or use defaults.
+
+        The file is `config_path`, else $BITWISE_MCP_CONFIG, else ./config.yaml.
+        Relative paths inside it resolve against the file's directory, so the
+        server finds the same index whatever its working directory is.
+        $BITWISE_MCP_INDEX_DIR overrides index.directory.
+        """
         if config_path is None:
-            config_path = Path("config.yaml")
+            env_path = os.getenv("BITWISE_MCP_CONFIG")
+            config_path = Path(env_path) if env_path else Path("config.yaml")
 
-        if not config_path.exists():
-            return cls()
+        if config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            config = cls(**data)
+            base = config_path.resolve().parent
+            config.doc_dirs = [d if d.is_absolute() else base / d for d in config.doc_dirs]
+            if not config.index.directory.is_absolute():
+                config.index.directory = base / config.index.directory
+        else:
+            config = cls()
 
-        with open(config_path, "r") as f:
-            data = yaml.safe_load(f)
-
-        return cls(**data)
+        env_index = os.getenv("BITWISE_MCP_INDEX_DIR")
+        if env_index:
+            config.index.directory = Path(env_index)
+        return config
 
     def get_api_key(self) -> Optional[str]:
         """Get API key from environment."""

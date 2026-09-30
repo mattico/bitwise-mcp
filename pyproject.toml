@@ -1,6 +1,6 @@
 [project]
 name = "mcp-embedded-docs"
-version = "0.3.0"
+version = "0.4.0"
 description = "MCP server for embedded systems documentation - search registers, memory maps, and datasheets"
 authors = [{ name = "Mike A" }]
 readme = "README.md"

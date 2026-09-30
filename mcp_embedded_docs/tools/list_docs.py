@@ -1,7 +1,6 @@
 """List documents tool."""
 
 import logging
-from pathlib import Path
 from typing import Optional
 
 from ..indexing.metadata_store import MetadataStore
@@ -10,8 +9,8 @@ from ..config import Config
 logger = logging.getLogger(__name__)
 
 
-async def list_docs(config: Optional[Config] = None) -> str:
-    """List all PDF files in doc directories and their index status.
+def list_docs(config: Optional[Config] = None) -> str:
+    """List indexed documents and PDFs available for ingestion.
 
     Args:
         config: Configuration object
@@ -24,43 +23,46 @@ async def list_docs(config: Optional[Config] = None) -> str:
 
     # Lightweight DB check for indexed status
     db_path = config.index.directory / config.index.metadata_db
-    indexed_filenames: dict = {}
+    indexed: dict = {}
     if db_path.exists():
         store = MetadataStore(db_path)
         try:
             for doc in store.list_documents():
-                indexed_filenames[doc['filename']] = doc
+                stats = store.get_document_stats(doc["id"]) or {}
+                indexed[doc["filename"].lower()] = {**doc, **stats}
         finally:
             store.close()
 
     # Scan doc directories for PDF files
-    all_pdfs = []
+    available: dict = {}
     for doc_dir in config.doc_dirs:
         if not doc_dir.exists():
             continue
         for pdf_path in doc_dir.glob("**/*.pdf"):
-            all_pdfs.append({
-                'path': pdf_path,
-                'name': pdf_path.name,
-                'size_mb': pdf_path.stat().st_size / (1024 * 1024),
-                'indexed': pdf_path.name in indexed_filenames,
-            })
+            available.setdefault(pdf_path.name.lower(), pdf_path)
 
-    if not all_pdfs:
+    if not indexed and not available:
         return f"No PDF files found in: {', '.join(str(d) for d in config.doc_dirs)}"
 
-    all_pdfs.sort(key=lambda x: (not x['indexed'], x['name']))
-
     lines = ["# Documentation", ""]
-    indexed_count = sum(1 for p in all_pdfs if p['indexed'])
-    lines.append(f"**{len(all_pdfs)}** PDFs found ({indexed_count} indexed)")
+    lines.append(f"**{len(indexed)}** indexed · **{len(set(available) - set(indexed))}** "
+                 f"more PDFs available in {', '.join(str(d) for d in config.doc_dirs)}")
     lines.append("")
 
-    for pdf in all_pdfs:
-        status = "indexed" if pdf['indexed'] else "not indexed"
-        lines.append(f"- **{pdf['name']}** ({pdf['size_mb']:.1f} MB) — {status}")
-        if pdf['indexed']:
-            doc = indexed_filenames[pdf['name']]
-            lines.append(f"  - ID: `{doc['id']}`")
+    if indexed:
+        lines.append("## Indexed (use the id as doc_filter / read_pages doc)")
+        for key in sorted(indexed, key=lambda k: indexed[k]["filename"].lower()):
+            doc = indexed[key]
+            label = doc["title"] or doc["filename"]
+            extra = f" — {doc['filename']}" if doc["title"] else ""
+            lines.append(f"- `{doc['id']}` **{label}**{extra} ({doc.get('chunks', 0)} chunks)")
+        lines.append("")
+
+    not_indexed = sorted((p for k, p in available.items() if k not in indexed),
+                         key=lambda p: p.name.lower())
+    if not_indexed:
+        lines.append("## Available, not indexed (ingest_docs with the filename)")
+        for p in not_indexed:
+            lines.append(f"- {p.name} ({p.stat().st_size / (1024 * 1024):.1f} MB)")
 
     return "\n".join(lines)

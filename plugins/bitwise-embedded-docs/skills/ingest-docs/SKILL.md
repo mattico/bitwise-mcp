@@ -2,7 +2,7 @@
 description: Ingest a PDF datasheet or reference manual into the search index
 ---
 
-Help the user ingest a PDF documentation file into the embedded docs search index. Use the `ingest_docs` MCP tool with the path to the PDF file.
+Help the user ingest a PDF documentation file into the embedded docs search index. Use the `ingest_docs` MCP tool with the path to the PDF file, or just its filename as shown by `list_docs`. Ingesting an already-indexed document replaces the old copy.
 
 Steps:
 1. Ask the user for the path to the PDF if not provided

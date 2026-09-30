@@ -24,8 +24,10 @@ def _run_server():
     # Route logs to stderr so the MCP host (Claude Code, VSCode) can surface
     # them. stdout is reserved for the JSON-RPC protocol.
     _configure_logging()
-    from .server import mcp
-    mcp.run(transport="stdio")
+    from .server import mcp, start_warmup
+    from .stdio import run_stdio
+    start_warmup()
+    run_stdio(mcp)
 
 
 def cli():
@@ -39,21 +41,14 @@ def cli():
 
 def _cli_group():
     """Build the Click CLI group with heavy imports deferred."""
-    import logging
     import click
     from pathlib import Path
-    import hashlib
 
     from .config import Config
-    from .ingestion.pdf_parser import PDFParser
-    from .ingestion.table_detector import TableDetector
-    from .ingestion.table_extractor import TableExtractor
-    from .ingestion.chunker import SemanticChunker
-    from .indexing.embedder import LocalEmbedder
-    from .indexing.vector_store import VectorStore
     from .indexing.metadata_store import MetadataStore
 
-    logger = logging.getLogger(__name__)
+    def echo(message: str):
+        click.echo(message, err=True)
 
     @click.group()
     def _cli():
@@ -61,7 +56,7 @@ def _cli_group():
         _configure_logging()
 
     @_cli.command()
-    @click.argument('pdf_path', type=click.Path(exists=True))
+    @click.argument('pdf_path', type=click.Path(exists=True, dir_okay=False))
     @click.option('--title', help='Document title')
     @click.option('--version', help='Document version')
     @click.option(
@@ -75,128 +70,44 @@ def _cli_group():
         ),
     )
     def ingest(pdf_path: str, title: str = None, version: str = None, no_tables: bool = False):
-        """Index a PDF document."""
-        pdf_path = Path(pdf_path)
+        """Index a PDF document (replacing any previous version of it)."""
+        from .ingestion.pipeline import ingest_pdf
+
         config = Config.load()
-        overall_start = time.perf_counter()
+        try:
+            report = ingest_pdf(
+                Path(pdf_path), config,
+                title=title, version=version,
+                detect_tables=not no_tables,
+                progress=echo,
+            )
+        except (FileNotFoundError, ValueError) as e:
+            raise click.ClickException(str(e))
 
-        click.echo(f"Ingesting {pdf_path.name}...", err=True)
-
-        doc_id = hashlib.md5(pdf_path.name.encode()).hexdigest()[:16]
-
-        click.echo("Parsing PDF...", err=True)
-        parse_start = time.perf_counter()
-        with PDFParser(pdf_path) as parser:
-            pages = parser.extract_text_with_layout()
-            toc = parser.extract_toc()
-            sections = parser.detect_sections(pages, toc)
-        logger.debug(
-            "Parsed %s into %d pages / %d sections in %.2fs",
-            pdf_path.name,
-            len(pages),
-            len(sections),
-            time.perf_counter() - parse_start,
-        )
-
-        click.echo(f"  Extracted {len(pages)} pages, {len(sections)} sections", err=True)
-
-        all_tables = []
-        table_pages = {}
-        if no_tables:
-            click.echo("Skipping register-table detection (--no-tables).", err=True)
+        echo(f"Successfully indexed {report.filename}")
+        echo(f"  Document ID: {report.doc_id}")
+        echo(f"  Total chunks: {report.chunks}")
+        echo(f"  Register tables: {report.tables}")
+        if config.embeddings.enabled:
+            echo(f"  Vectors: {report.vectors}")
         else:
-            click.echo(f"Detecting register tables across {len(pages)} pages...", err=True)
-            table_start = time.perf_counter()
-            extractor = TableExtractor(str(pdf_path))
+            echo("  Vectors: 0 (embeddings disabled)")
+        if report.replaced_chunks:
+            echo(f"  Replaced chunks: {report.replaced_chunks} (previous version)")
+        timing = ", ".join(f"{k} {v:.1f}s" for k, v in report.timings.items())
+        echo(f"  Time: {report.seconds:.1f}s ({timing})")
 
-            with TableDetector(str(pdf_path)) as detector:
-                for i, page in enumerate(pages):
-                    if i % 200 == 0:
-                        click.echo(f"  page {i}/{len(pages)} (tables found: {len(all_tables)})", err=True)
-                    detected = detector.detect_register_tables(page)
-                    for region, table_data in detected:
-                        context = detector.detect_table_context(page, region)
-                        table = extractor.extract_register_table(region, table_data, context)
-                        if table:
-                            table_pages[len(all_tables)] = region.page_num
-                            all_tables.append(table)
+    @_cli.command()
+    @click.argument('doc_id')
+    def remove(doc_id: str):
+        """Remove a document (by ID, see `list`) and its vectors from the index."""
+        from .ingestion.pipeline import remove_document
 
-            click.echo(f"  Found {len(all_tables)} register tables", err=True)
-            logger.debug(
-                "Detected %d register tables in %.2fs",
-                len(all_tables),
-                time.perf_counter() - table_start,
-            )
-
-        click.echo("Creating semantic chunks...", err=True)
-        chunk_start = time.perf_counter()
-        chunker = SemanticChunker(
-            target_size=config.chunking.target_size,
-            overlap=config.chunking.overlap,
-            preserve_tables=config.chunking.preserve_tables,
-            pdf_path=pdf_path,
-        )
-
-        doc_title = title or pdf_path.stem
-        chunks = chunker.chunk_document(
-            doc_id, sections, all_tables,
-            doc_title=doc_title,
-            table_pages=table_pages,
-        )
-        click.echo(f"  Created {len(chunks)} chunks", err=True)
-        logger.debug("Created %d chunks in %.2fs", len(chunks), time.perf_counter() - chunk_start)
-
-        click.echo("Indexing...", err=True)
-        embedder = LocalEmbedder(
-            model_name=config.embeddings.model,
-            device=config.embeddings.device
-        )
-
-        vector_store = VectorStore(dimension=embedder.dimension)
-        # Load any existing FAISS index before adding new vectors so we
-        # accumulate across ingests instead of overwriting every time.
-        vector_path = config.index.directory / config.index.vector_file
-        if vector_path.exists():
-            vector_store.load(vector_path)
-        metadata_store = MetadataStore(config.index.directory / config.index.metadata_db)
-
-        metadata_store.add_document(
-            doc_id=doc_id,
-            filename=pdf_path.name,
-            title=title,
-            version=version
-        )
-
-        chunk_texts = [chunk.text for chunk in chunks]
-        chunk_ids = [chunk.id for chunk in chunks]
-
-        click.echo("  Creating embeddings...", err=True)
-        embeddings = embedder.embed_batch(chunk_texts, show_progress=True)
-
-        vector_store.add_vectors(embeddings, chunk_ids)
-
-        click.echo("  Storing metadata...", err=True)
-        for chunk in chunks:
-            metadata_store.add_chunk(
-                chunk_id=chunk.id,
-                doc_id=chunk.doc_id,
-                chunk_type=chunk.chunk_type,
-                text=chunk.text,
-                page_start=chunk.page_start,
-                page_end=chunk.page_end,
-                structured_data=chunk.structured_data,
-                metadata=chunk.metadata
-            )
-
-        config.index.directory.mkdir(parents=True, exist_ok=True)
-        vector_store.save(config.index.directory / config.index.vector_file)
-        metadata_store.close()
-
-        click.echo(f"Successfully indexed {pdf_path.name}", err=True)
-        click.echo(f"  Document ID: {doc_id}", err=True)
-        click.echo(f"  Total chunks: {len(chunks)}", err=True)
-        click.echo(f"  Register tables: {len(all_tables)}", err=True)
-        logger.debug("Completed ingest for %s in %.2fs", pdf_path.name, time.perf_counter() - overall_start)
+        report = remove_document(doc_id, Config.load())
+        if report is None:
+            raise click.ClickException(f"Document not found: {doc_id}")
+        echo(f"Removed {report.filename} (ID: {report.doc_id}): "
+             f"{report.chunks} chunks, {report.vectors} vectors")
 
     @_cli.command()
     def serve():
@@ -205,56 +116,90 @@ def _cli_group():
 
     @_cli.command(name="rebuild-vectors")
     def rebuild_vectors():
-        """Rebuild the FAISS index from chunks already in the metadata DB.
+        """Rebuild the FTS5 keyword index and the FAISS index from the metadata DB.
 
         Useful when the vector file is missing, corrupted, or was clobbered
         by a prior bug (the older ingest path overwrote the index per
-        document instead of accumulating). Doesn't re-parse PDFs.
+        document instead of accumulating), or after changing the embedding
+        model. Doesn't re-parse PDFs.
         """
-        import sqlite3
+        import numpy as np
+
         config = Config.load()
-
-        embedder = LocalEmbedder(
-            model_name=config.embeddings.model,
-            device=config.embeddings.device
-        )
-
         db_path = config.index.directory / config.index.metadata_db
         if not db_path.exists():
-            click.echo(f"No metadata DB at {db_path}", err=True)
+            echo(f"No metadata DB at {db_path}")
             return
 
-        con = sqlite3.connect(db_path)
-        con.row_factory = sqlite3.Row
+        store = MetadataStore(db_path)
+        try:
+            # External-content FTS5 can end up with stale rowid pointers
+            # ("fts5: missing row N from content table 'chunks'"), which
+            # silently empties keyword search. Rebuilding repairs it.
+            echo("Rebuilding FTS5 keyword index...")
+            store.rebuild_fts()
 
-        # SQLite FTS5 with content='chunks' uses external-content rowids.
-        # After enough INSERT OR REPLACE / DELETE rounds (re-ingest, remove)
-        # the FTS5 side ends up with stale rowid pointers and every query
-        # raises "fts5: missing row N from content table 'chunks'", which
-        # propagates as an empty keyword side and looks like the doc isn't
-        # indexed at all. The built-in rebuild command repairs it.
-        click.echo("Rebuilding FTS5 keyword index...", err=True)
-        con.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
-        con.commit()
+            if not config.embeddings.enabled:
+                echo("Embeddings are disabled in config; rebuilt the keyword index only.")
+                return
 
-        rows = list(con.execute("SELECT id, text FROM chunks ORDER BY rowid"))
-        con.close()
+            # Embed document by document so progress is readable, then
+            # pick up any chunks whose document row is missing.
+            groups = []
+            seen = set()
+            for doc in sorted(store.list_documents(), key=lambda d: d["filename"] or ""):
+                ids = store.get_chunk_ids(doc["id"])
+                seen.update(ids)
+                if ids:
+                    groups.append((doc["filename"], ids))
+            leftover = [cid for cid in store.all_chunk_ids() if cid not in seen]
+            if leftover:
+                groups.append(("(chunks without a document row)", leftover))
 
-        if not rows:
-            click.echo("No chunks in metadata DB to embed.", err=True)
-            return
+            total = sum(len(ids) for _, ids in groups)
+            if not total:
+                echo("No chunks in metadata DB to embed.")
+                return
 
-        click.echo(f"Re-embedding {len(rows)} chunks...", err=True)
-        chunk_ids = [r["id"] for r in rows]
-        chunk_texts = [r["text"] for r in rows]
-        embeddings = embedder.embed_batch(chunk_texts, show_progress=True)
+            from .indexing.embedder import LocalEmbedder
+            from .indexing.vector_store import VectorStore
 
-        vector_store = VectorStore(dimension=embedder.dimension)
-        vector_store.add_vectors(embeddings, chunk_ids)
+            echo("Loading embedding model...")
+            embedder = LocalEmbedder(
+                model_name=config.embeddings.model,
+                device=config.embeddings.device
+            )
+            vector_store = VectorStore(dimension=embedder.dimension)
 
-        config.index.directory.mkdir(parents=True, exist_ok=True)
-        vector_store.save(config.index.directory / config.index.vector_file)
-        click.echo(f"Wrote {len(chunk_ids)} vectors to {config.index.directory / config.index.vector_file}", err=True)
+            echo(f"Re-embedding {total} chunks from {len(groups)} documents...")
+            for name, ids in groups:
+                chunks = store.get_chunks(ids)
+                ids = [cid for cid in ids if cid in chunks]
+                echo(f"  {name}: {len(ids)} chunks")
+                embeddings = embedder.embed_batch(
+                    [chunks[cid]["text"] for cid in ids], show_progress=True)
+                vector_store.add_vectors(np.asarray(embeddings, dtype=np.float32), ids)
+
+            # Embedding took a while without the write lock; an ingest or
+            # remove may have committed since. Reconcile and save under the
+            # lock so neither side's changes are lost.
+            vector_path = config.index.directory / config.index.vector_file
+            with store.write_transaction():
+                live = set(store.all_chunk_ids())
+                vector_store.remove_ids(set(vector_store.ids) - live)
+                have = set(vector_store.ids)
+                added = [cid for cid in live if cid not in have]
+                if added:
+                    echo(f"  {len(added)} chunks were added meanwhile; embedding them")
+                    chunks = store.get_chunks(added)
+                    added = [cid for cid in added if cid in chunks]
+                    embeddings = embedder.embed_batch([chunks[cid]["text"] for cid in added])
+                    vector_store.add_vectors(np.asarray(embeddings, dtype=np.float32), added)
+                vector_store.save(vector_path)
+        finally:
+            store.close()
+
+        echo(f"Wrote {vector_store.size} vectors to {vector_path}")
 
     @_cli.command(name="list")
     def list_cmd():

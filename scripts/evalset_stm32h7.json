@@ -1,0 +1,182 @@
+[
+ {
+  "doc": "STM32H743_Ref",
+  "section": "7.2.3 Role of DMAMUX2%",
+  "keyword": "DMAMUX2 D3 domain BDMA",
+  "paraphrase": "which request multiplexer feeds the basic DMA controller in the low-power domain"
+ },
+ {
+  "doc": "STM32H743_Ref",
+  "section": "18.3.18 AXI dead time%",
+  "keyword": "AXI dead time between accesses",
+  "paraphrase": "limit bus bandwidth by inserting idle cycles between consecutive master transfers"
+ },
+ {
+  "doc": "STM32H743_Ref",
+  "section": "46.3.6 Programmable alarms%",
+  "keyword": "RTC alarm A configuration",
+  "paraphrase": "wake the chip at a particular calendar time using the real-time clock"
+ },
+ {
+  "doc": "STM32H743_Err",
+  "section": "2.25.7 %zero-length packet%",
+  "keyword": "OTG errata zero-length packet",
+  "paraphrase": "USB controller bug sending data when an empty packet was expected"
+ },
+ {
+  "doc": "STM32H743_Err",
+  "section": "2.19.1 10-bit controller mode%",
+  "keyword": "I2C 10-bit addressing errata",
+  "paraphrase": "I2C master cannot start a new transaction when the slave NACKs the first byte of an extended address"
+ },
+ {
+  "doc": "STM32H743_Ref",
+  "section": "8.5.3 Clock Security System%",
+  "keyword": "HSE failure detection clock security",
+  "paraphrase": "what happens if the external crystal stops oscillating"
+ },
+ {
+  "doc": "STM32H743_Ref",
+  "section": "45.3.5 Low-power freeze%",
+  "keyword": "IWDG stop mode freeze option byte",
+  "paraphrase": "keep the independent watchdog from counting while the chip sleeps"
+ },
+ {
+  "doc": "STM32H7_Cortex",
+  "section": "4.8.5 Initializing and enabling the L1%",
+  "keyword": "enable data cache instruction cache CCR",
+  "paraphrase": "turn on the processor's L1 caches at boot"
+ },
+ {
+  "doc": "STM32H743_Ref",
+  "section": "8.4.6 Backup domain reset%",
+  "keyword": "backup domain reset BDRST",
+  "paraphrase": "how to clear the RTC and backup registers back to defaults"
+ },
+ {
+  "doc": "STM32H743_Ref",
+  "section": "57.15.3 Device initialization%",
+  "keyword": "OTG device mode initialization sequence",
+  "paraphrase": "steps to bring up the USB controller as a peripheral"
+ },
+ {
+  "doc": "STM32H743_Ref",
+  "section": "57.15.1 Core initialization%",
+  "keyword": "OTG core initialization GAHBCFG",
+  "paraphrase": "first setup steps for the USB controller after power-on"
+ },
+ {
+  "doc": "STM32H743_Ref",
+  "section": "4.4.3 Option byte modification%",
+  "keyword": "change option bytes OPTSTRT",
+  "paraphrase": "procedure for programming the user configuration bytes in flash"
+ },
+ {
+  "doc": "STM32H743_Err",
+  "section": "2.2.3 Clock recovery system%",
+  "keyword": "CRS USB SOF synchronization errata",
+  "paraphrase": "trimming the internal 48 MHz oscillator from USB frames is broken"
+ },
+ {
+  "doc": "USB334x.pdf",
+  "section": "6.5.3 Link Power Management%",
+  "keyword": "USB334x LPM",
+  "paraphrase": "USB 2.0 L1 sleep state support in the PHY"
+ },
+ {
+  "doc": "ULPI_v1_1",
+  "section": "Receive Command Byte (RX CMD)%",
+  "keyword": "ULPI RX CMD byte",
+  "paraphrase": "status byte the PHY sends to the link reporting line state and VBUS"
+ },
+ {
+  "doc": "ULPI_Design",
+  "section": "4.2 Hardware Reset (RESETB)%",
+  "keyword": "ULPI RESETB hardware reset",
+  "paraphrase": "asserting the transceiver's reset pin at power up"
+ },
+ {
+  "doc": "STM32H7_SDMMC",
+  "section": "3.3 DMA Double-buffer mode%",
+  "keyword": "SDMMC IDMA double buffer",
+  "paraphrase": "ping-pong buffering for SD card transfers"
+ },
+ {
+  "doc": "STM32H743_Ref",
+  "section": "15.3.10 Circular mode%",
+  "keyword": "DMA circular mode",
+  "paraphrase": "DMA stream that automatically restarts at the beginning of the buffer"
+ },
+ {
+  "doc": "STM32H743_Err",
+  "section": "2.6.4 Unsupported read access with unaligned%",
+  "keyword": "unaligned read access errata",
+  "paraphrase": "misaligned load returns wrong data bug"
+ },
+ {
+  "doc": "STM32H7_Cortex",
+  "section": "4.8.7 Cache maintenance design hints%",
+  "keyword": "cache maintenance DMA clean invalidate",
+  "paraphrase": "keeping memory consistent between CPU and bus masters when caches are on"
+ },
+ {
+  "doc": "STM32H743_Err",
+  "section": "2.2.12 RTC stopped when a system reset%",
+  "keyword": "RTC LSI system reset errata",
+  "paraphrase": "real-time clock halts after reset when running from internal low-speed oscillator"
+ },
+ {
+  "doc": "STM32H743_Ref",
+  "section": "3.2 RAMECC main features%",
+  "keyword": "RAMECC monitoring",
+  "paraphrase": "detecting single and double bit errors in SRAM"
+ },
+ {
+  "doc": "STM32H743BI",
+  "section": "%External clock source characteristics%",
+  "keyword": "HSE crystal load capacitance",
+  "paraphrase": "which capacitors to put on the oscillator pins"
+ },
+ {
+  "doc": "ULPI_Design",
+  "section": "4.3 Software Reset%",
+  "keyword": "ULPI software reset function control",
+  "paraphrase": "resetting the transceiver via a register write instead of the pin"
+ },
+ {
+  "doc": "STM32H743_Err",
+  "section": "2.8.1 Busy signal not detected%",
+  "keyword": "SDMMC suspend resume busy errata",
+  "paraphrase": "SD card busy indication missed when continuing an interrupted transfer"
+ },
+ {
+  "doc": "ULPI_v1_1",
+  "section": "Vbus Power Control%",
+  "keyword": "ULPI DrvVbus power control",
+  "paraphrase": "who drives 5V on the USB connector in host mode"
+ },
+ {
+  "doc": "STM32H743_Ref",
+  "section": "4.7.7 Error correction code error%",
+  "keyword": "flash ECC single double error",
+  "paraphrase": "flash bit-flip detection interrupt"
+ },
+ {
+  "doc": "STM32H743BI",
+  "section": "3.5.1 Power supply scheme%",
+  "keyword": "power supply scheme VCAP LDO",
+  "paraphrase": "how is the core voltage generated and which pins need decoupling"
+ },
+ {
+  "doc": "ULPI_v1_1",
+  "section": "Interrupt Event Notification%",
+  "keyword": "ULPI interrupt event notification",
+  "paraphrase": "how the PHY tells the link about a VBUS change while in low power"
+ },
+ {
+  "doc": "STM32H743_Err",
+  "section": "2.25.2 Transmit data FIFO is corrupted%",
+  "keyword": "OTG TX FIFO corrupted errata",
+  "paraphrase": "USB transmit buffer gets garbage if firmware accesses other registers during the write"
+ }
+]
