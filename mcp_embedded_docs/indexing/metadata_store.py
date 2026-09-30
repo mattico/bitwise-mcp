@@ -376,13 +376,12 @@ class MetadataStore:
         if doc_filter:
             sql += " AND doc_id = ?"
             params.append(doc_filter)
-        sql += " LIMIT ?"
+        # Every row contains every token, so there is nothing to rank by;
+        # document order at least keeps the result stable.
+        sql += " ORDER BY rowid LIMIT ?"
         params.append(top_k)
         rows = self.conn.execute(sql, params).fetchall()
-        lowered = [t.lower() for t in tokens]
-        scored = [(r["id"], float(sum(t in r["text"].lower() for t in lowered))) for r in rows]
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored
+        return [(r["id"], 1.0) for r in rows]
 
     def get_chunk(self, chunk_id: str) -> Optional[Dict[str, Any]]:
         """Get chunk by ID.
@@ -417,21 +416,18 @@ class MetadataStore:
     def get_section_chunks(self, chunk_id: str) -> List[Dict[str, Any]]:
         """All chunks sharing `chunk_id`'s document and section, in document order."""
         with self.lock:
-            row = self.conn.execute(
-                "SELECT doc_id, section_hierarchy FROM chunks WHERE id = ?", (chunk_id,)
-            ).fetchone()
-            if not row:
-                return []
             target = self.conn.execute(
                 f"SELECT {_CHUNK_COLUMNS} FROM chunks WHERE id = ?", (chunk_id,)
             ).fetchone()
-            path = section_path(target["text"])
-            if row["section_hierarchy"] is None:
+            if not target:
+                return []
+            if target["section_hierarchy"] is None:
                 return [_row_to_chunk(target)]
+            path = section_path(target["text"])
             rows = self.conn.execute(
                 f"SELECT {_CHUNK_COLUMNS} FROM chunks "
                 "WHERE doc_id = ? AND section_hierarchy = ? ORDER BY rowid",
-                (row["doc_id"], row["section_hierarchy"]),
+                (target["doc_id"], target["section_hierarchy"]),
             ).fetchall()
         return [_row_to_chunk(r) for r in rows if section_path(r["text"]) == path]
 
@@ -603,6 +599,11 @@ class MetadataStore:
             return [r[0] for r in self.conn.execute(
                 "SELECT id FROM chunks WHERE doc_id = ?", (doc_id,))]
 
+    def data_version(self) -> int:
+        """SQLite's data_version: changes whenever another connection commits."""
+        with self.lock:
+            return int(self.conn.execute("PRAGMA data_version").fetchone()[0])
+
     def all_chunk_ids(self) -> List[str]:
         """Every chunk id in the index."""
         with self.lock:
@@ -683,8 +684,12 @@ def section_path(text: str) -> Optional[str]:
     """The '[Doc > ... > Leaf]' line a chunk starts with, which identifies its
     section. The stored section_hierarchy is only the leaf title, and leaf
     titles repeat ('Signals', 'Overview' under many parents)."""
+    # The prefix ends with ']\n' (see formatter.split_prefix); a bare ']' can
+    # occur inside a title ('Bits [31:0] config').
     if text.startswith("["):
-        end = text.find("]")
+        end = text.find("]\n")
+        if end == -1 and text.endswith("]"):
+            end = len(text) - 1
         if end != -1:
             return text[:end + 1]
     return None

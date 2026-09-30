@@ -205,13 +205,21 @@ def run_plans(query: str, n: int, min_hits: int,
                 return PlanResult(hits=rows, mode="as-given", terms=highlight_terms(query))
             notes.append("nothing matched the query as FTS5 syntax (quotes, OR/AND/NOT/NEAR, "
                          "*, parentheses); searched its plain words instead.")
+            # 'USB NOT enumerate' is prose as often as FTS5, and an empty
+            # verbatim result cannot tell them apart. Keep the words, but say
+            # plainly that the results are the ones NOT would have excluded.
+            if re.search(r"\bNOT\b", query):
+                notes.append("NOT was not applied: every chunk with the other terms also "
+                             "contains the term after NOT, so the results below contain it.")
         except SearchSyntaxError as exc:
-            notes.append(f"query is not valid FTS5 syntax ({exc}); searched its words instead.")
+            notes.append(f"query is not valid FTS5 syntax ({exc}); searched its words instead."
+                         + (" NOT was not applied." if re.search(r"\bNOT\b", query) else ""))
         used.append("as-given")
         query = _EXPLICIT.sub(" ", query)
         plans = build_plans(query)
 
     seen: Dict[str, Tuple[str, float]] = {}
+    strict_hits = None
     for mode, fts in plans:
         try:
             rows = run(fts, n)
@@ -220,11 +228,18 @@ def run_plans(query: str, n: int, min_hits: int,
         used.append(mode)
         for row in rows:
             seen.setdefault(row[0], row)
+        if strict_hits is None:
+            strict_hits = len(seen)
         if len(seen) >= min(min_hits, n):
             break
-    if len([u for u in used if u != "as-given"]) > 1 and seen:
-        notes.append(f"all terms together matched too few chunks; widened to {used[-1]} "
-                     "(terms optional, ranked by relevance), strict matches listed first.")
+    # Only mention widening when it actually added hits.
+    if strict_hits is not None and len(seen) > strict_hits:
+        if len(units_of(query)) > 1:
+            notes.append(f"all terms together matched too few chunks; widened to {used[-1]} "
+                         "(terms optional, ranked by relevance), strict matches listed first.")
+        else:
+            notes.append("the exact term matched few chunks; added words it prefixes, "
+                         "exact matches listed first.")
     return PlanResult(hits=list(seen.values())[:n], mode="+".join(used),
                       note=" ".join(notes), terms=terms_of(query))
 

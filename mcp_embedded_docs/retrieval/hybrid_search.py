@@ -54,16 +54,34 @@ class HybridSearch:
         self._embedder_thread: Optional[threading.Thread] = None
         self._embed_lock = threading.Lock()
         self._doc_titles: Dict[str, str] = {}
+        self._reload_lock = threading.Lock()
+        # What the loaded state was read from; see refresh_if_stale.
+        self._vector_sig: Tuple[Any, ...] = ()
+        self._data_version = -1
+        self._vectors_status = ""
+        self.semantic_status = ""
+        self._auto_load_embedder = load_embedder
 
-        self.semantic_status = self._load_vectors()
-        self._refresh_doc_titles()
-        if load_embedder and self.vector_store is not None:
-            self.ensure_embedder(wait=0)
+        self.reload()
 
     # ------------------------------------------------------------ lifecycle
 
+    def _vector_signature(self) -> Tuple[Any, ...]:
+        """(mtime, size) of the FAISS file and its id file; changes on every save."""
+        vector_path = self.config.index.directory / self.config.index.vector_file
+        sig: List[Any] = []
+        for path in (vector_path, vector_path.with_suffix(".ids")):
+            try:
+                st = path.stat()
+                sig.append((st.st_mtime_ns, st.st_size))
+            except OSError:
+                sig.append(None)
+        return tuple(sig)
+
     def _load_vectors(self) -> str:
         """Load the FAISS file; returns 'on' or why semantic search is off."""
+        # Taken before reading, so a save that lands mid-load is seen next time.
+        self._vector_sig = self._vector_signature()
         if not self.config.embeddings.enabled:
             self.vector_store = None
             return "off (embeddings.enabled is false)"
@@ -87,16 +105,54 @@ class HybridSearch:
             self.vector_store = None
             return f"off (vector index unreadable: {exc})"
 
-    def _refresh_doc_titles(self):
+    def _refresh_metadata(self):
+        """Doc titles, and how many chunks the loaded vectors leave out."""
+        self._data_version = self.metadata_store.data_version()
         self._doc_titles = {
             d["id"]: d["title"] or d["filename"] for d in self.metadata_store.list_documents()
         }
+        status = self._vectors_status
+        store = self.vector_store
+        if store is not None:
+            chunk_ids = self.metadata_store.all_chunk_ids()
+            have = set(store.ids)
+            missing = sum(1 for cid in chunk_ids if cid not in have)
+            if missing:
+                status = (f"partial ({missing} of {len(chunk_ids)} chunks have no vector; "
+                          "run rebuild-vectors)")
+        self.semantic_status = status
 
     def reload(self):
-        """Pick up changes written by an ingest or remove."""
-        self.semantic_status = self._load_vectors()
-        self._refresh_doc_titles()
-        if self.vector_store is not None:
+        """Pick up changes written by an ingest, remove or rebuild-vectors."""
+        with self._reload_lock:
+            self._vectors_status = self._load_vectors()
+            self._refresh_metadata()
+        self._maybe_start_embedder()
+
+    def refresh_if_stale(self):
+        """Reload whatever another process changed since it was loaded.
+
+        A CLI ingest, remove or rebuild-vectors writes the index files directly;
+        this notices via the vector files' mtime/size and SQLite's data_version
+        (which changes whenever another connection commits). Costs two stats
+        and a pragma per call.
+        """
+        vectors_changed = self._vector_signature() != self._vector_sig
+        if not vectors_changed and self.metadata_store.data_version() == self._data_version:
+            return
+        with self._reload_lock:
+            # Another thread may have reloaded while this one waited.
+            if self._vector_signature() != self._vector_sig:
+                logger.info("vector index changed on disk; reloading")
+                self._vectors_status = self._load_vectors()
+            elif self.metadata_store.data_version() == self._data_version:
+                return
+            self._refresh_metadata()
+        self._maybe_start_embedder()
+
+    def _maybe_start_embedder(self):
+        """Start loading the model in the background once there are vectors to query."""
+        if self._auto_load_embedder and self.vector_store is not None:
             self.ensure_embedder(wait=0)
 
     def ensure_embedder(self, wait: float = EMBEDDER_WAIT_SECONDS) -> bool:
@@ -124,6 +180,7 @@ class HybridSearch:
             self.embedder = LocalEmbedder(
                 model_name=self.config.embeddings.model,
                 device=self.config.embeddings.device,
+                batch_size=self.config.embeddings.batch_size,
             )
             logger.info("embedder loaded in %.2fs (model=%s)",
                         time.perf_counter() - t0, self.config.embeddings.model)
@@ -162,6 +219,7 @@ class HybridSearch:
         # A fixed floor keeps ranking independent of top_k for typical calls.
         pool = max(30, top_k * 3)
         response = SearchResponse(query=query, results=[])
+        self.refresh_if_stale()
 
         t0 = time.perf_counter()
         try:
@@ -212,7 +270,8 @@ class HybridSearch:
         try:
             vector = self.embedder.embed_query(query)  # thread-safe
             prefix = f"{doc_filter}_" if doc_filter else None
-            return [cid for cid, _ in store.search(vector, top_k, id_prefix=prefix)], "on"
+            ids = [cid for cid, _ in store.search(vector, top_k, id_prefix=prefix)]
+            return ids, self.semantic_status
         except Exception as exc:  # noqa: BLE001 - keyword results still useful
             logger.exception("semantic search failed")
             return [], f"failed ({exc})"
@@ -319,6 +378,7 @@ class HybridSearch:
         Returns:
             {"kind": "exact"|"ambiguous"|"none", "name", "results", "candidates"}
         """
+        self.refresh_if_stale()
         m = self.metadata_store.find_register_matches(name, peripheral)
         return {
             "kind": m["kind"],

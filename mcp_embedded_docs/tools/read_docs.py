@@ -25,13 +25,18 @@ def _strip_overlap(prev: str, nxt: str, max_overlap: int = 600) -> str:
 
 
 def section_text(store: MetadataStore, chunk_id: str, max_chars: int = 20000,
-                 offset: int = 0) -> Tuple[str, bool]:
+                 offset: int = 0,
+                 chunks: Optional[List[Dict]] = None) -> Tuple[str, bool]:
     """Full text of the section containing `chunk_id`, chunks stitched in order.
+
+    Args:
+        chunks: The section's chunks, if the caller already fetched them
 
     Returns:
         (text, truncated)
     """
-    chunks = store.get_section_chunks(chunk_id)
+    if chunks is None:
+        chunks = store.get_section_chunks(chunk_id)
     if not chunks:
         return "", False
     bodies: List[str] = []
@@ -51,12 +56,12 @@ def read_section(search: HybridSearch, chunk_id: str, max_chars: int = 20000,
                  offset: int = 0) -> str:
     """Markdown for the whole section a search hit came from."""
     chunk_id = chunk_id.strip().strip("`")
-    chunk = search.metadata_store.get_chunk(chunk_id)
+    chunks = search.metadata_store.get_section_chunks(chunk_id)
+    chunk = next((c for c in chunks if c["id"] == chunk_id), None)
     if chunk is None:
         return f"No chunk '{chunk_id}'. Chunk ids come from search_docs results."
     hierarchy, _ = split_prefix(chunk["text"])
-    text, truncated = section_text(search.metadata_store, chunk_id, max_chars, offset)
-    chunks = search.metadata_store.get_section_chunks(chunk_id)
+    text, truncated = section_text(search.metadata_store, chunk_id, max_chars, offset, chunks)
     first = min((c["page_start"] for c in chunks if c["page_start"] is not None), default=None)
     last = max((c["page_end"] for c in chunks if c["page_end"] is not None), default=None)
     title = " > ".join(hierarchy) if hierarchy else (chunk["section_hierarchy"] or chunk_id)
@@ -83,16 +88,20 @@ def parse_pages(pages: str) -> Tuple[int, int]:
     return first, last
 
 
-_pdf_path_cache: Dict[str, Optional[Path]] = {}
+_pdf_path_cache: Dict[str, Path] = {}
 
 
 def resolve_pdf(doc: Dict, config: Config) -> Optional[Path]:
-    """Where the source PDF of an indexed document lives, if it can be found."""
+    """Where the source PDF of an indexed document lives, if it can be found.
+
+    Only hits are cached: a PDF copied into doc_dirs later is still found.
+    """
     if doc.get("path") and Path(doc["path"]).is_file():
         return Path(doc["path"])
     name = doc["filename"]
-    if name in _pdf_path_cache:
-        return _pdf_path_cache[name]
+    cached = _pdf_path_cache.get(name)
+    if cached is not None and cached.is_file():
+        return cached
     found = None
     for d in config.doc_dirs:
         if not d.exists():
@@ -103,7 +112,8 @@ def resolve_pdf(doc: Dict, config: Config) -> Optional[Path]:
                 break
         if found:
             break
-    _pdf_path_cache[name] = found
+    if found:
+        _pdf_path_cache[name] = found
     return found
 
 

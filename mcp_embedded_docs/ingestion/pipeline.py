@@ -13,12 +13,11 @@ needs it.
 from __future__ import annotations
 
 import hashlib
-import inspect
 import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Collection, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:
     import numpy as np
@@ -51,6 +50,9 @@ class IngestReport:
     replaced_chunks: int
     seconds: float
     timings: Dict[str, float] = field(default_factory=dict)
+    # Chunks of any document that have no vector (ingested while embeddings
+    # were off, or before vectors.faiss was lost); rebuild-vectors fills them in.
+    unembedded_chunks: int = 0
 
 
 @dataclass
@@ -178,11 +180,12 @@ def ingest_pdf(
             embedder = LocalEmbedder(
                 model_name=config.embeddings.model,
                 device=config.embeddings.device,
+                batch_size=config.embeddings.batch_size,
             )
             timings["load_model"] = time.perf_counter() - t0
             t0 = time.perf_counter()
         say(f"Embedding {len(chunks)} chunks...")
-        embeddings = _embed(embedder, [c.text for c in chunks], config, say)
+        embeddings = _embed(embedder, [c.text for c in chunks], say)
     elif not use_vectors:
         say("Embeddings disabled; skipping vectors.")
     timings["embed"] = time.perf_counter() - t0
@@ -195,6 +198,7 @@ def ingest_pdf(
     index_dir.mkdir(parents=True, exist_ok=True)
 
     metadata_store = MetadataStore(index_dir / config.index.metadata_db)
+    unembedded = 0
     try:
         # One transaction for rows and vectors: SQLite's write lock is held
         # across processes, so the FAISS read-modify-write below cannot race
@@ -248,6 +252,11 @@ def ingest_pdf(
                 removed += vector_store.remove_ids(orphans)
                 vector_store.save(vector_path)
                 logger.debug("Removed %d stale vectors (%d orphans)", removed, len(orphans))
+                if use_vectors:
+                    have = set(vector_store.ids)
+                    unembedded = sum(1 for cid in live if cid not in have)
+            elif use_vectors:
+                unembedded = len(metadata_store.all_chunk_ids())
     finally:
         metadata_store.close()
     timings["store"] = time.perf_counter() - t0
@@ -264,7 +273,11 @@ def ingest_pdf(
         replaced_chunks=len(old_ids),
         seconds=time.perf_counter() - overall_start,
         timings=timings,
+        unembedded_chunks=unembedded,
     )
+    if unembedded:
+        logger.warning("%d chunks in the index have no vector; run rebuild-vectors",
+                       unembedded)
     logger.info(
         "Ingested %s: %d chunks, %d vectors, %d replaced in %.1fs (%s)",
         report.filename,
@@ -339,25 +352,15 @@ def _detect_tables(pdf_path: Path, pages: List[Any], say: Callable[[str], None])
     return tables, table_pages
 
 
-def _embed(
-    embedder: Any, texts: List[str], config: "Config", say: Callable[[str], None]
-) -> "np.ndarray":
+def _embed(embedder: Any, texts: List[str], say: Callable[[str], None]) -> "np.ndarray":
     """Embed texts in groups, reporting progress between groups."""
     import numpy as np
-
-    kwargs: Dict[str, Any] = {}
-    try:
-        params: Collection[str] = inspect.signature(embedder.embed_batch).parameters
-    except (TypeError, ValueError):
-        params = ()
-    if "batch_size" in params:
-        kwargs["batch_size"] = config.embeddings.batch_size
 
     parts = []
     for start in range(0, len(texts), EMBED_GROUP):
         group = texts[start : start + EMBED_GROUP]
         parts.append(
-            np.asarray(embedder.embed_batch(group, **kwargs), dtype=np.float32)
+            np.asarray(embedder.embed_batch(group), dtype=np.float32)
         )
         if len(texts) > EMBED_GROUP:
             say(f"  embedded {min(start + EMBED_GROUP, len(texts))}/{len(texts)}")

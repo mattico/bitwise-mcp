@@ -78,6 +78,34 @@ def test_no_widen_note_when_nothing_matches():
     assert res.hits == [] and res.note == ""
 
 
+def test_no_widen_note_when_widening_adds_nothing():
+    # one strict hit; prefix-or runs but finds the same chunk
+    res = q.run_plans("GUSBCFG", 5, 3, lambda fts, limit: [("c1", 1.0)])
+    assert res.mode == "strict+prefix-or"
+    assert res.note == ""
+
+
+def test_single_term_widen_note_does_not_mention_all_terms():
+    def run(fts, limit):
+        return [("c1", 1.0), ("c2", 0.5)] if "*" in fts else [("c1", 1.0)]
+
+    res = q.run_plans("GUSBCFG", 5, 3, run)
+    assert [h[0] for h in res.hits] == ["c1", "c2"]
+    assert "prefixes" in res.note and "all terms" not in res.note
+
+
+def test_fallback_says_not_was_not_applied():
+    def run(fts, limit):
+        return [] if "NOT" in fts else [("c1", 1.0)]
+
+    res = q.run_plans("USB NOT host", 5, 1, run)
+    assert res.hits == [("c1", 1.0)]
+    assert "NOT was not applied" in res.note
+
+    res = q.run_plans('"USB core" OR host', 5, 1, lambda fts, limit: [] if "OR" in fts else [("c1", 1.0)])
+    assert "NOT was not applied" not in res.note
+
+
 def test_snippets_highlight_inflected_forms_and_collapse_whitespace():
     body = "Intro.\n\n   The IWDG   counter stops when the core is halted in debug mode.   Timings vary."
     out = q.snippets(body, ["debug", "timing"], k=2)

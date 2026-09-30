@@ -96,6 +96,9 @@ def _cli_group():
             echo(f"  Replaced chunks: {report.replaced_chunks} (previous version)")
         timing = ", ".join(f"{k} {v:.1f}s" for k, v in report.timings.items())
         echo(f"  Time: {report.seconds:.1f}s ({timing})")
+        if report.unembedded_chunks:
+            echo(f"Warning: {report.unembedded_chunks} chunks in the index have no vector, "
+                 "so semantic search cannot find them. Run `mcp-embedded-docs rebuild-vectors`.")
 
     @_cli.command()
     @click.argument('doc_id')
@@ -167,7 +170,8 @@ def _cli_group():
             echo("Loading embedding model...")
             embedder = LocalEmbedder(
                 model_name=config.embeddings.model,
-                device=config.embeddings.device
+                device=config.embeddings.device,
+                batch_size=config.embeddings.batch_size,
             )
             vector_store = VectorStore(dimension=embedder.dimension)
 

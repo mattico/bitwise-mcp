@@ -2,7 +2,7 @@
 
 import sqlite3
 
-from mcp_embedded_docs.indexing.metadata_store import MetadataStore
+from mcp_embedded_docs.indexing.metadata_store import MetadataStore, section_path
 
 
 def _chunk(chunk_id, text, section="1 Intro", doc_id="d1", structured=None, chunk_type="text"):
@@ -168,6 +168,23 @@ def test_sections_with_the_same_leaf_title_stay_separate(tmp_path):
         ])
         assert [c["id"] for c in store.get_section_chunks("a2")] == ["a1", "a2"]
         assert [c["id"] for c in store.get_section_chunks("b1")] == ["b1"]
+    finally:
+        store.close()
+
+
+def test_section_titles_with_brackets_stay_separate(tmp_path):
+    assert section_path("[Doc > Bits [31:0] config]\nbody") == "[Doc > Bits [31:0] config]"
+    assert section_path("[Doc > Bits [31:0] config]") == "[Doc > Bits [31:0] config]"
+    store = MetadataStore(tmp_path / "m.db")
+    try:
+        store.add_document("d1", "d1.pdf")
+        store.add_chunks([
+            _chunk("a", "[Spec > Regs > Bits [31:0]]\nconfig", section="Bits [31:0]"),
+            _chunk("b", "[Spec > Other > Bits [31:0]]\nstatus", section="Bits [31:0]"),
+        ])
+        assert [c["id"] for c in store.get_section_chunks("a")] == ["a"]
+        assert [c["id"] for c in store.get_section_chunks("b")] == ["b"]
+        assert store.get_section_chunks("missing") == []
     finally:
         store.close()
 

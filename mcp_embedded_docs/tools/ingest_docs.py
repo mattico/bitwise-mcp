@@ -84,6 +84,13 @@ def ingest_docs(
         + (" (previous version removed)" if report.replaced_chunks else ""),
         f"- **Time:** {report.seconds:.1f}s ({timing})",
     ]
+    if report.unembedded_chunks:
+        lines += [
+            "",
+            f"⚠️ {report.unembedded_chunks} chunks in the index (from this or other documents) "
+            "have no vector, so semantic search cannot find them. Run "
+            "`mcp-embedded-docs rebuild-vectors` to embed them.",
+        ]
     return "\n".join(lines)
 
 

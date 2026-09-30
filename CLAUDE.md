@@ -57,6 +57,8 @@ Query → HybridSearch.search_ex
         → ResultFormatter → markdown with highlighted snippets
 ```
 
+A running server picks up CLI ingests/removes/rebuilds on its own: `HybridSearch.refresh_if_stale()` runs before each search and register lookup, and reloads the vectors when `vectors.faiss`/`.ids` change (mtime/size) and doc titles when SQLite's `PRAGMA data_version` changes. Its semantic status reads `partial (…)` when some chunks have no vector.
+
 `tests/` has unit tests, but ranking changes should be checked against a real index with a known-item query set; keep the numbers in the change description.
 
 ### Storage

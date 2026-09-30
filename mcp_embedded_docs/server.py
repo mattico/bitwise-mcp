@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 _config: Optional[Config] = None
 _search: Optional["HybridSearch"] = None
 _search_lock = threading.Lock()
+# How long an ingest waits for the shared embedding model before loading its own.
+INGEST_EMBEDDER_WAIT_SECONDS = 600.0
 
 
 def get_config() -> Config:
@@ -235,7 +237,13 @@ async def ingest_docs(
     from .tools.ingest_docs import ingest_docs as _ingest
 
     def _run(**kw: Any) -> str:
-        embedder = _search.embedder if _search is not None else None
+        # Share the server's model rather than loading a second copy; wait for
+        # it if it is still loading (or was never started: no vectors yet).
+        embedder = None
+        if get_config().embeddings.enabled:
+            search = get_search()
+            if search.ensure_embedder(wait=INGEST_EMBEDDER_WAIT_SECONDS):
+                embedder = search.embedder
         try:
             return _ingest(config=get_config(), embedder=embedder, **kw)
         finally:

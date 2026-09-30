@@ -16,15 +16,18 @@ class LocalEmbedder:
     # Texts encoded per lock acquisition in embed_batch.
     LOCK_SLICE = 32
 
-    def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5", device: str = "cpu"):
+    def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5", device: str = "cpu",
+                 batch_size: int = 32):
         """Initialize embedder.
 
         Args:
             model_name: Name of the sentence-transformers model
             device: Device to run on ("cpu" or "cuda")
+            batch_size: Texts per forward pass in embed_batch
         """
         self.model_name = model_name
         self.device = device
+        self.batch_size = max(1, batch_size)
         self._lock = threading.Lock()
         # Load from the local Hugging Face cache first: otherwise every start
         # asks the Hub for model metadata (~1s, and it stalls when the network
@@ -53,18 +56,21 @@ class LocalEmbedder:
         # under concurrent use; torch already spreads one encode across cores,
         # so serializing costs little. The lock is taken per slice so a search
         # waits for at most one slice of a long ingest, not the whole batch.
-        if show_progress or len(texts) <= self.LOCK_SLICE:
+        # A slice smaller than batch_size would cap the forward-pass size.
+        step = max(self.LOCK_SLICE, self.batch_size)
+        if show_progress or len(texts) <= step:
             with self._lock:
                 return self._encode(texts, show_progress)
         parts = []
-        for i in range(0, len(texts), self.LOCK_SLICE):
+        for i in range(0, len(texts), step):
             with self._lock:
-                parts.append(self._encode(texts[i:i + self.LOCK_SLICE], False))
+                parts.append(self._encode(texts[i:i + step], False))
         return np.vstack(parts)
 
     def _encode(self, texts: List[str], show_progress: bool) -> np.ndarray:
         return self.model.encode(
             texts,
+            batch_size=self.batch_size,
             show_progress_bar=show_progress,
             convert_to_numpy=True,
             normalize_embeddings=True  # Normalize for cosine similarity

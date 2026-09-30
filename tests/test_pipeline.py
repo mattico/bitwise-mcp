@@ -268,3 +268,61 @@ def _chunk_texts(cfg: Config) -> list[str]:
         return [r[0] for r in con.execute("SELECT text FROM chunks")]
     finally:
         con.close()
+
+
+def test_ingest_reports_chunks_left_without_vectors(tmp_path, config):
+    config.embeddings.enabled = False
+    first = ingest_pdf(make_pdf(tmp_path / "docs" / "a.pdf", SECTIONS_V1), config)
+    assert first.unembedded_chunks == 0  # nobody expects vectors with embeddings off
+
+    config.embeddings.enabled = True
+    second = ingest_pdf(make_pdf(tmp_path / "docs" / "b.pdf", SECTIONS_V2), config,
+                        embedder=FakeEmbedder())
+    assert second.vectors == second.chunks
+    assert second.unembedded_chunks == first.chunks
+
+    text = ingest_docs(str(tmp_path / "docs" / "b.pdf"), config=config, embedder=FakeEmbedder())
+    assert "rebuild-vectors" in text
+
+
+def test_search_sees_changes_made_by_another_process(tmp_path, config):
+    from mcp_embedded_docs.retrieval.hybrid_search import HybridSearch
+
+    a = ingest_pdf(make_pdf(tmp_path / "docs" / "a.pdf", SECTIONS_V1), config,
+                   title="Widget A", embedder=FakeEmbedder())
+    search = HybridSearch(config, load_embedder=False)
+    try:
+        assert len(search.vector_store) == a.chunks
+        assert search.semantic_status == "on"
+
+        # Stands in for a CLI ingest: its own connection and its own FAISS save.
+        b = ingest_pdf(make_pdf(tmp_path / "docs" / "b.pdf", SECTIONS_V2), config,
+                       title="Widget B", embedder=FakeEmbedder())
+        search.refresh_if_stale()  # what search_ex / find_register_ex call first
+        assert len(search.vector_store) == a.chunks + b.chunks
+        assert search._doc_titles[b.doc_id] == "Widget B"
+
+        # Row-only change (embeddings off): titles refresh and the status
+        # reports the chunks semantic search cannot reach.
+        config.embeddings.enabled = False
+        c = ingest_pdf(make_pdf(tmp_path / "docs" / "c.pdf", SECTIONS_V1), config, title="C")
+        config.embeddings.enabled = True
+        search.refresh_if_stale()
+        assert search._doc_titles[c.doc_id] == "C"
+        assert search.semantic_status.startswith(f"partial ({c.chunks} of ")
+
+        remove_document(b.doc_id, config)
+        search.refresh_if_stale()
+        assert len(search.vector_store) == a.chunks
+        assert b.doc_id not in search._doc_titles
+    finally:
+        search.close()
+
+
+def test_resolve_pdf_does_not_cache_misses(tmp_path, config):
+    from mcp_embedded_docs.tools.read_docs import resolve_pdf
+
+    doc = {"path": str(tmp_path / "elsewhere" / "late.pdf"), "filename": "late.pdf"}
+    assert resolve_pdf(doc, config) is None
+    pdf = make_pdf(tmp_path / "docs" / "late.pdf", SECTIONS_V1)
+    assert resolve_pdf(doc, config) == pdf
