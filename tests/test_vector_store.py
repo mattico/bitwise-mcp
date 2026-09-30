@@ -67,3 +67,16 @@ def test_load_rejects_mismatched_pair_and_accepts_old_format(tmp_path):
     old = VectorStore()
     old.load(tmp_path / "old.faiss")
     assert old.ids == ["a_1"] and len(old) == 1
+
+
+def test_model_is_saved_and_old_files_have_none(tmp_path):
+    vs = VectorStore(dimension=3, model="some/model")
+    vs.add_vectors(_unit([[1, 0, 0]]), ["a_1"])
+    vs.save(tmp_path / "v.faiss")
+    loaded = VectorStore()
+    loaded.load(tmp_path / "v.faiss")
+    assert loaded.model == "some/model"
+
+    VectorStore(dimension=3).save(tmp_path / "none.faiss")
+    loaded.load(tmp_path / "none.faiss")
+    assert loaded.model is None

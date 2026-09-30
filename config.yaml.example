@@ -3,9 +3,11 @@ doc_dirs:
 
 embeddings:
   enabled: true            # false = keyword-only search, no torch
-  model: "BAAI/bge-small-en-v1.5"
+  model: "ibm-granite/granite-embedding-english-r2"   # or "BAAI/bge-small-en-v1.5": ~5x faster to embed
   device: "cpu"
   batch_size: 32
+  # query_prefix: ""       # default: the model's retrieval prefix (BGE: "Represent this sentence...")
+  max_seq_length: 512     # truncate chunks; null = the model's own limit
 
 llm_fallback:
   enabled: false
@@ -23,6 +25,9 @@ search:
   keyword_weight: 0.5     # reciprocal-rank-fusion weights
   semantic_weight: 0.5
   top_k_default: 5
+  rerank: false           # cross-encoder over the top rerank_depth sections
+  rerank_model: "cross-encoder/ms-marco-MiniLM-L6-v2"
+  rerank_depth: 20
 
 index:
   directory: "./index"

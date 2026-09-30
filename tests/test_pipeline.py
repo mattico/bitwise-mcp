@@ -326,3 +326,17 @@ def test_resolve_pdf_does_not_cache_misses(tmp_path, config):
     assert resolve_pdf(doc, config) is None
     pdf = make_pdf(tmp_path / "docs" / "late.pdf", SECTIONS_V1)
     assert resolve_pdf(doc, config) == pdf
+
+
+def test_ingest_records_model_and_refuses_another(tmp_path, config):
+    pdf = make_pdf(tmp_path / "docs" / "widget.pdf", SECTIONS_V1)
+    embedder = FakeEmbedder()
+    embedder.model_name = "fake/a"
+    ingest_pdf(pdf, config, embedder=embedder)
+    assert load_vectors(config).model == "fake/a"
+
+    other = FakeEmbedder()
+    other.model_name = "fake/b"
+    with pytest.raises(ValueError, match="built with fake/a"):
+        ingest_pdf(pdf, config, embedder=other)
+    assert load_vectors(config).model == "fake/a"

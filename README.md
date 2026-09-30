@@ -112,7 +112,7 @@ Built on [FastMCP](https://github.com/jlowin/fastmcp) for the MCP server layer. 
 1. **PDF Parsing** (PyMuPDF) - Extracts text with layout, TOC, and section hierarchy
 2. **Table Detection** (pdfplumber) - Identifies register maps, bitfield definitions, memory maps
 3. **Semantic Chunking** - Leaf-only section chunking with contextual hierarchy prefixes, sentence-aware splitting, and content-based deduplication
-4. **Embedding** (sentence-transformers, bge-small-en-v1.5) - Local embeddings, no API calls; the model is read from the local Hugging Face cache after the first download
+4. **Embedding** (sentence-transformers, granite-embedding-english-r2) - Local embeddings, no API calls; the model is read from the local Hugging Face cache after the first download. Changing `embeddings.model` requires `rebuild-vectors`
 5. **Indexing** (FAISS + SQLite FTS5) - Rows and vectors are written in one transaction; re-ingesting a document replaces its previous chunks and vectors
 
 ## Tech Stack

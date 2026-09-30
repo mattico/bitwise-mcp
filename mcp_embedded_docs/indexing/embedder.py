@@ -2,12 +2,35 @@
 
 import logging
 import threading
-from typing import List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
+
+
+def model_kwargs(device: str) -> Dict[str, Any]:
+    """Load weights as float32 on CPU.
+
+    transformers 5 keeps a checkpoint's own dtype, and ModernBERT-based
+    models ship as bfloat16/float16, which CPUs run ~6x slower than float32.
+    """
+    import torch
+
+    return {"dtype": torch.float32} if device == "cpu" else {}
+
+_BGE_QUERY = "Represent this sentence for searching relevant passages: "
+
+# Retrieval prefixes from the model cards, applied to queries only. Asymmetric
+# models are trained with short queries carrying the prefix and passages
+# without it; a bare query lands closer to other short texts than to the
+# passage that answers it.
+QUERY_PREFIXES = {
+    "BAAI/bge-small-en-v1.5": _BGE_QUERY,
+    "BAAI/bge-base-en-v1.5": _BGE_QUERY,
+    "BAAI/bge-large-en-v1.5": _BGE_QUERY,
+}
 
 
 class LocalEmbedder:
@@ -16,27 +39,40 @@ class LocalEmbedder:
     # Texts encoded per lock acquisition in embed_batch.
     LOCK_SLICE = 32
 
-    def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5", device: str = "cpu",
-                 batch_size: int = 32):
+    def __init__(self, model_name: str = "ibm-granite/granite-embedding-english-r2",
+                 device: str = "cpu",
+                 batch_size: int = 32, query_prefix: Optional[str] = None,
+                 max_seq_length: Optional[int] = None):
         """Initialize embedder.
 
         Args:
             model_name: Name of the sentence-transformers model
             device: Device to run on ("cpu" or "cuda")
             batch_size: Texts per forward pass in embed_batch
+            query_prefix: Prepended to queries in embed_query; None uses
+                QUERY_PREFIXES for the model, "" none
+            max_seq_length: Truncate texts to this many tokens; None keeps
+                the model's limit (never raised above it)
         """
         self.model_name = model_name
         self.device = device
         self.batch_size = max(1, batch_size)
+        self.query_prefix = (QUERY_PREFIXES.get(model_name, "")
+                             if query_prefix is None else query_prefix)
         self._lock = threading.Lock()
         # Load from the local Hugging Face cache first: otherwise every start
         # asks the Hub for model metadata (~1s, and it stalls when the network
         # is flaky). Only a model that was never downloaded goes online.
         try:
-            self.model = SentenceTransformer(model_name, device=device, local_files_only=True)
+            self.model = SentenceTransformer(model_name, device=device, local_files_only=True,
+                                             model_kwargs=model_kwargs(device))
         except Exception as exc:  # noqa: BLE001 - any cache miss falls back to download
             logger.info("model %s not in local cache (%s); downloading", model_name, exc)
-            self.model = SentenceTransformer(model_name, device=device)
+            self.model = SentenceTransformer(model_name, device=device,
+                                             model_kwargs=model_kwargs(device))
+        if max_seq_length:
+            limit = self.model.max_seq_length
+            self.model.max_seq_length = min(max_seq_length, limit) if limit else max_seq_length
         get_dim = getattr(self.model, "get_embedding_dimension", None) \
             or self.model.get_sentence_embedding_dimension
         self.dimension = get_dim()
@@ -88,7 +124,7 @@ class LocalEmbedder:
         return self.embed_batch([text])[0]
 
     def embed_query(self, query: str) -> np.ndarray:
-        """Embed a query (same as text embedding for this model).
+        """Embed a search query, with the model's query prefix.
 
         Args:
             query: Query text
@@ -96,4 +132,4 @@ class LocalEmbedder:
         Returns:
             Embedding vector
         """
-        return self.embed_single(query)
+        return self.embed_single(self.query_prefix + query)

@@ -7,6 +7,11 @@ ranking change, against the same index.
 
     uv run python scripts/eval_search.py [--config path/to/config.yaml] [--cases scripts/evalset_stm32h7.json]
 
+--query-prefix and --rerank override the config, so variants compare on one index:
+
+    uv run python scripts/eval_search.py --query-prefix ""
+    uv run python scripts/eval_search.py --rerank cross-encoder/ms-marco-MiniLM-L6-v2
+
 The bundled cases target the STM32H7 document set (reference manual, errata,
 datasheet, Cortex-M7 reference, ULPI and USB334x docs).
 """
@@ -24,6 +29,9 @@ def main() -> None:
     ap.add_argument("--config", help="config.yaml (default: $BITWISE_MCP_CONFIG or ./config.yaml)")
     ap.add_argument("--cases", default=str(Path(__file__).with_name("evalset_stm32h7.json")))
     ap.add_argument("--top-k", type=int, default=5)
+    ap.add_argument("--query-prefix", help='embeddings.query_prefix ("" for none)')
+    ap.add_argument("--rerank", metavar="MODEL", help="enable search.rerank with this model")
+    ap.add_argument("--rerank-depth", type=int, help="search.rerank_depth")
     args = ap.parse_args()
     if args.config:
         os.environ["BITWISE_MCP_CONFIG"] = args.config
@@ -34,6 +42,13 @@ def main() -> None:
 
     cases = json.loads(Path(args.cases).read_text(encoding="utf-8"))
     config = Config.load()
+    if args.query_prefix is not None:
+        config.embeddings.query_prefix = args.query_prefix
+    if args.rerank:
+        config.search.rerank = True
+        config.search.rerank_model = args.rerank
+    if args.rerank_depth:
+        config.search.rerank_depth = args.rerank_depth
     con = sqlite3.connect(f"file:{config.index.directory / config.index.metadata_db}?mode=ro", uri=True)
     styles = [k for k in cases[0] if k not in ("doc", "section")]
 
@@ -51,6 +66,8 @@ def main() -> None:
         config.embeddings.enabled = enabled
         search = HybridSearch(config)
         search.ensure_embedder()
+        if config.search.rerank:
+            search.ensure_reranker(wait=600)  # first use may download the model
         label = "hybrid" if enabled else "keyword"
         for style in styles:
             h1 = h5 = 0

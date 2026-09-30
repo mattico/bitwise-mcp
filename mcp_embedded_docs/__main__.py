@@ -172,8 +172,9 @@ def _cli_group():
                 model_name=config.embeddings.model,
                 device=config.embeddings.device,
                 batch_size=config.embeddings.batch_size,
+                max_seq_length=config.embeddings.max_seq_length,
             )
-            vector_store = VectorStore(dimension=embedder.dimension)
+            vector_store = VectorStore(dimension=embedder.dimension, model=config.embeddings.model)
 
             echo(f"Re-embedding {total} chunks from {len(groups)} documents...")
             for name, ids in groups:

@@ -31,7 +31,7 @@ PDF → pdf_parser.py (PyMuPDF: text, TOC, section hierarchy)
     → table_detector.py (pdfplumber: find register tables on pages)
     → table_extractor.py (parse tables into Register/BitField structures)
     → chunker.py (semantic chunking with context prefixes)
-    → embedder.py (bge-small-en-v1.5, 384-dim, normalized)
+    → embedder.py (granite-embedding-english-r2, 768-dim, normalized, float32 on CPU)
     → vector_store.py (FAISS IndexFlatL2) + metadata_store.py (SQLite FTS5)
 ```
 
@@ -54,6 +54,7 @@ Query → HybridSearch.search_ex
         └─ _semantic_search() → FAISS (waits ≤20s for the background-loaded model)
         → weighted reciprocal-rank fusion (k=60, weights 0.5/0.5)
         → collapse chunks of the same section into one result
+        → optional cross-encoder rerank of the top sections (retrieval/reranker.py)
         → ResultFormatter → markdown with highlighted snippets
 ```
 
@@ -73,7 +74,11 @@ A running server picks up CLI ingests/removes/rebuilds on its own: `HybridSearch
 `config.yaml` (optional, falls back to defaults), or `$BITWISE_MCP_CONFIG`; relative paths resolve against the config file's directory, `$BITWISE_MCP_INDEX_DIR` overrides the index dir. Pydantic models in `config.py`:
 - `chunking.target_size`: 2500 chars, `overlap`: 200 chars
 - `search.keyword_weight`: 0.5, `semantic_weight`: 0.5 (rank-fusion weights)
-- `embeddings.enabled`: true (false = keyword-only, no torch), `model`: `BAAI/bge-small-en-v1.5`, `device`: `cpu`
+- `search.rerank`: false, `rerank_model`: `cross-encoder/ms-marco-MiniLM-L6-v2`, `rerank_depth`: 20 (cross-encoder pass over the fused top sections)
+- `embeddings.enabled`: true (false = keyword-only, no torch), `model`: `ibm-granite/granite-embedding-english-r2`, `device`: `cpu`
+- `embeddings.query_prefix`: unset = the model's retrieval prefix from `embedder.QUERY_PREFIXES`, `""` = none (query-side only, no re-index)
+- `embeddings.max_seq_length`: 512 (null = the model's limit); caps tokens per chunk (needs rebuild-vectors)
+- The vector index records the model it was built with (`.ids` file); search turns semantic off with a rebuild-vectors hint if the configured model differs, and ingest refuses to mix models
 
 ## Plugin
 

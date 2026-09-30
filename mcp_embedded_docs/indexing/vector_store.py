@@ -14,13 +14,16 @@ import numpy as np
 class VectorStore:
     """FAISS-based vector storage for semantic search."""
 
-    def __init__(self, dimension: int = 384):
+    def __init__(self, dimension: int = 384, model: Optional[str] = None):
         """Initialize vector store.
 
         Args:
             dimension: Dimension of embedding vectors
+            model: Embedding model the vectors come from (saved with them)
         """
         self.dimension = dimension
+        # None for files saved before the model was recorded.
+        self.model = model
         # Use L2 distance (with normalized embeddings, equivalent to cosine similarity)
         self.index = faiss.IndexFlatL2(dimension)
         self.ids: List[str] = []  # Map from FAISS index position to chunk ID
@@ -105,7 +108,7 @@ class VectorStore:
         query_vector = np.ascontiguousarray(query_vector.astype(np.float32))
 
         # A flat index scores every vector anyway, so a filtered search simply
-        # asks for all of them; ~10k x 384 floats is a few milliseconds.
+        # asks for all of them; ~10k x 768 floats is a few milliseconds.
         k = self.index.ntotal if id_prefix else min(self.index.ntotal, top_k * 2)
         distances, indices = self.index.search(query_vector, k)
 
@@ -138,7 +141,8 @@ class VectorStore:
         filepath.parent.mkdir(parents=True, exist_ok=True)
         id_file = filepath.with_suffix('.ids')
         data = faiss.serialize_index(self.index).tobytes()
-        meta = {"ids": self.ids, "ntotal": self.index.ntotal, "digest": _digest(data)}
+        meta = {"ids": self.ids, "ntotal": self.index.ntotal, "digest": _digest(data),
+                "model": self.model}
 
         tmp_index = filepath.with_name(filepath.name + ".tmp")
         tmp_ids = id_file.with_name(id_file.name + ".tmp")
@@ -168,9 +172,10 @@ class VectorStore:
             with open(id_file, 'rb') as f:
                 meta = pickle.load(f)
             if isinstance(meta, list):  # pre-0.4 files carry no digest
-                ids, ok = meta, True
+                ids, ok, model = meta, True, None
             else:
                 ids, ok = meta["ids"], meta.get("digest") == _digest(data)
+                model = meta.get("model")
             if ok:
                 break
             if time.monotonic() > deadline:
@@ -185,6 +190,7 @@ class VectorStore:
         self.index = index
         self.dimension = index.d
         self.ids = list(ids)
+        self.model = model
 
     @property
     def size(self) -> int:

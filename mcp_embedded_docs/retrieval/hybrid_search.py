@@ -14,6 +14,7 @@ from .query import terms_of
 if TYPE_CHECKING:
     from ..indexing.embedder import LocalEmbedder
     from ..indexing.vector_store import VectorStore
+    from .reranker import Reranker
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,10 @@ class HybridSearch:
         self._embedder_ready = threading.Event()
         self._embedder_thread: Optional[threading.Thread] = None
         self._embed_lock = threading.Lock()
+        self.reranker: Optional["Reranker"] = None
+        self._reranker_error: Optional[str] = None
+        self._reranker_ready = threading.Event()
+        self._reranker_thread: Optional[threading.Thread] = None
         self._doc_titles: Dict[str, str] = {}
         self._reload_lock = threading.Lock()
         # What the loaded state was read from; see refresh_if_stale.
@@ -96,6 +101,10 @@ class HybridSearch:
             t0 = time.perf_counter()
             store = VectorStore()
             store.load(vector_path)
+            if store.model and store.model != self.config.embeddings.model:
+                self.vector_store = None
+                return (f"off (vectors are from {store.model} but embeddings.model is "
+                        f"{self.config.embeddings.model}; run rebuild-vectors)")
             self.vector_store = store
             logger.info("vector store loaded in %.2fs (%d vectors)",
                         time.perf_counter() - t0, len(store))
@@ -151,9 +160,11 @@ class HybridSearch:
         self._maybe_start_embedder()
 
     def _maybe_start_embedder(self):
-        """Start loading the model in the background once there are vectors to query."""
+        """Start loading the models in the background once there is something to query."""
         if self._auto_load_embedder and self.vector_store is not None:
             self.ensure_embedder(wait=0)
+        if self._auto_load_embedder and self.config.search.rerank:
+            self.ensure_reranker(wait=0)
 
     def ensure_embedder(self, wait: float = EMBEDDER_WAIT_SECONDS) -> bool:
         """Start loading the embedding model if needed; wait up to `wait` seconds.
@@ -181,6 +192,8 @@ class HybridSearch:
                 model_name=self.config.embeddings.model,
                 device=self.config.embeddings.device,
                 batch_size=self.config.embeddings.batch_size,
+                max_seq_length=self.config.embeddings.max_seq_length,
+                query_prefix=self.config.embeddings.query_prefix,
             )
             logger.info("embedder loaded in %.2fs (model=%s)",
                         time.perf_counter() - t0, self.config.embeddings.model)
@@ -189,6 +202,34 @@ class HybridSearch:
             self._embedder_error = f"{type(exc).__name__}: {exc}"
         finally:
             self._embedder_ready.set()
+
+    def ensure_reranker(self, wait: float = EMBEDDER_WAIT_SECONDS) -> bool:
+        """Start loading the cross-encoder if needed; wait up to `wait` seconds."""
+        if self._reranker_ready.is_set():
+            return self.reranker is not None
+        with self._embed_lock:
+            if self._reranker_thread is None:
+                self._reranker_thread = threading.Thread(
+                    target=self._load_reranker, name="reranker-load", daemon=True)
+                self._reranker_thread.start()
+        if wait:
+            self._reranker_ready.wait(wait)
+        return self.reranker is not None
+
+    def _load_reranker(self):
+        try:
+            t0 = time.perf_counter()
+            from .reranker import Reranker
+
+            self.reranker = Reranker(self.config.search.rerank_model,
+                                     device=self.config.embeddings.device)
+            logger.info("reranker loaded in %.2fs (model=%s)",
+                        time.perf_counter() - t0, self.config.search.rerank_model)
+        except Exception as exc:  # noqa: BLE001 - fused order still works
+            logger.exception("could not load reranker")
+            self._reranker_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            self._reranker_ready.set()
 
     # ------------------------------------------------------------ search
 
@@ -247,15 +288,45 @@ class HybridSearch:
 
         t0 = time.perf_counter()
         fused = self._fuse([cid for cid, _ in kw.hits], semantic_ids)
-        response.results = self._collapse(fused, top_k)
+        rerank = self.config.search.rerank
+        candidates = self._collapse(
+            fused, max(top_k, self.config.search.rerank_depth) if rerank else top_k)
         t_fetch = time.perf_counter() - t0
 
+        t0 = time.perf_counter()
+        if rerank:
+            candidates = self._rerank(query, candidates, response)
+        response.results = candidates[:top_k]
+        t_rerank = time.perf_counter() - t0
+
         logger.info(
-            "search %r done in %.3fs (keyword=%.3fs/%d %s, semantic=%.3fs/%d %s, fetch=%.3fs)",
+            "search %r done in %.3fs (keyword=%.3fs/%d %s, semantic=%.3fs/%d %s, fetch=%.3fs, "
+            "rerank=%.3fs)",
             query, time.perf_counter() - t_start, t_kw, len(kw.hits), response.keyword_mode,
-            t_sem, len(semantic_ids), response.semantic, t_fetch,
+            t_sem, len(semantic_ids), response.semantic, t_fetch, t_rerank,
         )
         return response
+
+    def _rerank(self, query: str, candidates: List[SearchResult],
+                response: SearchResponse) -> List[SearchResult]:
+        """Order candidates by cross-encoder score; unchanged if the model is unavailable."""
+        if len(candidates) < 2:
+            return candidates
+        if not self.ensure_reranker() or self.reranker is None:
+            why = (f"failed to load: {self._reranker_error}" if self._reranker_error
+                   else "still loading")
+            response.notes.append(f"reranker {why}; results are in fused order.")
+            return candidates
+        try:
+            scores = self.reranker.score(query, [r.text for r in candidates])
+        except Exception as exc:  # noqa: BLE001 - fused order is still a ranking
+            logger.exception("rerank failed")
+            response.notes.append(f"reranker failed ({exc}); results are in fused order.")
+            return candidates
+        for r, s in zip(candidates, scores):
+            r.score = s
+        # sorted() is stable: ties keep their fused order.
+        return sorted(candidates, key=lambda r: r.score, reverse=True)
 
     def _semantic_search(self, query: str, top_k: int,
                          doc_filter: Optional[str]) -> Tuple[List[str], str]:
@@ -267,6 +338,11 @@ class HybridSearch:
             if self._embedder_error:
                 return [], f"off (model failed to load: {self._embedder_error})"
             return [], "skipped (model still loading; keyword results only)"
+        if store.dimension != self.embedder.dimension:
+            # An index from before the model was recorded, built with another model.
+            return [], (f"off (vectors have dimension {store.dimension} but "
+                        f"{self.embedder.model_name} produces {self.embedder.dimension}; "
+                        "run rebuild-vectors)")
         try:
             vector = self.embedder.embed_query(query)  # thread-safe
             prefix = f"{doc_filter}_" if doc_filter else None

@@ -181,6 +181,7 @@ def ingest_pdf(
                 model_name=config.embeddings.model,
                 device=config.embeddings.device,
                 batch_size=config.embeddings.batch_size,
+                max_seq_length=config.embeddings.max_seq_length,
             )
             timings["load_model"] = time.perf_counter() - t0
             t0 = time.perf_counter()
@@ -218,6 +219,14 @@ def ingest_pdf(
                         f"{vector_store.dimension} but the embedder produces "
                         f"{embeddings.shape[1]}; run `mcp-embedded-docs rebuild-vectors`."
                     )
+                model = getattr(embedder, "model_name", None)
+                if vector_store.model and model and vector_store.model != model:
+                    raise ValueError(
+                        f"Existing vector index {vector_path} was built with "
+                        f"{vector_store.model} but the embedder is {model}; "
+                        "run `mcp-embedded-docs rebuild-vectors`."
+                    )
+                vector_store.model = vector_store.model or model
 
             old_ids = metadata_store.delete_document_chunks(doc_id)
             metadata_store.add_document(

@@ -13,9 +13,22 @@ class EmbeddingsConfig(BaseModel):
     # Semantic search on top of keyword search. Off means no torch import, no
     # model in memory, and ingest skips embedding; keyword search stands alone.
     enabled: bool = True
-    model: str = "BAAI/bge-small-en-v1.5"
+    # ModernBERT-based, 768-dim. On the STM32H7 known-item set it put the
+    # target first for 83% of keyword queries vs 73% for bge-small-en-v1.5
+    # (paraphrases even), at ~5x the CPU cost to embed.
+    model: str = "ibm-granite/granite-embedding-english-r2"
     device: str = "cpu"
     batch_size: int = 32
+    # Text put in front of search queries (not chunks) before embedding. None
+    # uses the model's documented retrieval prefix, if it has one (see
+    # embedder.QUERY_PREFIXES); "" sends queries bare. Query-side only, so
+    # changing it needs no re-index.
+    query_prefix: Optional[str] = None
+    # Tokens per text; longer chunks are truncated. None keeps the model's own
+    # limit (512 for BGE, 8192 for ModernBERT models, whose CPU cost and
+    # memory grow steeply with length). Most chunks fit in 512. Changing it
+    # needs rebuild-vectors.
+    max_seq_length: Optional[int] = 512
 
 
 class LLMFallbackConfig(BaseModel):
@@ -40,6 +53,12 @@ class SearchConfig(BaseModel):
     keyword_weight: float = 0.5
     semantic_weight: float = 0.5
     top_k_default: int = 5
+    # Re-order the top `rerank_depth` fused sections with a cross-encoder
+    # that reads query and chunk together. Costs a second model in memory and
+    # one forward pass per candidate on every search.
+    rerank: bool = False
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L6-v2"
+    rerank_depth: int = 20
 
 
 class IndexConfig(BaseModel):
